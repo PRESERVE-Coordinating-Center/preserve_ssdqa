@@ -1,0 +1,23 @@
+﻿concept_id,concept_code,concept_name,vocabulary_id,category
+45586653,I95,Hypotension,ICD10,hypotension
+40475102,I95-I99,Other and unspecified disorders of the circulatory system,ICD10,hypotension
+45562424,I95.0,Idiopathic hypotension,ICD10,hypotension
+45605872,I95.1,Orthostatic hypotension,ICD10,hypotension
+45543247,I95.2,Hypotension due to drugs,ICD10,hypotension
+45543248,I95.8,Other hypotension,ICD10,hypotension
+45572153,I95.9,"Hypotension, unspecified",ICD10,hypotension
+1569419,I95,Hypotension,ICD10CM,hypotension
+35207915,I95.0,Idiopathic hypotension,ICD10CM,hypotension
+35207916,I95.1,Orthostatic hypotension,ICD10CM,hypotension
+35207917,I95.2,Hypotension due to drugs,ICD10CM,hypotension
+45552870,I95.3,Hypotension of hemodialysis,ICD10CM,hypotension
+1569420,I95.8,Other hypotension,ICD10CM,hypotension
+45552871,I95.81,Postprocedural hypotension,ICD10CM,hypotension
+44821971,458,Hypotension,ICD9CM,hypotension
+44819738,458,Orthostatic hypotension,ICD9CM,hypotension
+44826658,458.1,Chronic hypotension,ICD9CM,hypotension
+44823135,458.2,Iatrogenic hypotension,ICD9CM,hypotension
+44830102,458.21,Hypotension of hemodialysis,ICD9CM,hypotension
+44832409,458.29,Other iatrogenic hypotension,ICD9CM,hypotension
+44833593,458.8,Other specified hypotension,ICD9CM,hypotension
+44833594,458.9,"Hypotension, unspecified",ICD9CM,hypotension

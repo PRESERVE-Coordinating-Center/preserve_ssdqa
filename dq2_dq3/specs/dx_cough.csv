@@ -1,0 +1,10 @@
+﻿concept_id,concept_code,concept_name,vocabulary_id,category
+35211275,R05,Cough,ICD10CM,cough
+45606792,R05,Cough,ICD10,cough
+766424,R05.1,Acute cough,ICD10CM,cough
+766425,R05.2,Subacute cough,ICD10CM,cough
+766426,R05.3,Chronic cough,ICD10CM,cough
+766427,R05.4,Cough syncope,ICD10CM,cough
+766428,R05.8,Other specified cough,ICD10CM,cough
+766429,R05.9,"Cough, unspecified",ICD10CM,cough
+44828154,786.2,Cough,ICD9CM,cough

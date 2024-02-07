@@ -1,0 +1,1761 @@
+---
+title: "PRESERVE DQ2 REPORT"
+author: "PRESERVE Coordinating Center"
+date: "`r format(Sys.time(), '%m/%d/%y')`"
+output:
+  bookdown::html_document2:
+    number_sections: TRUE
+    fig_caption: TRUE
+    toc: TRUE
+    toc_float:
+      collapsed: FALSE
+params:
+  mask_sites: FALSE
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6, fig.align = "center")
+
+# Default taken from R notebook behavior: when knitting, wd will always be location of notebook
+base_dir <- '..'
+Sys.setenv(PEDSNET_SKIP_REQUEST_EXECUTION=1)
+# try(source('../site/run.R')) # May not be able to make db connection
+source('../site/run.R')
+# Set to "local" to read data from ../results, or another value to read from db
+data_source <- if_else(config('execution_mode') == 'distribution', 'local', 'not_local')
+
+require(tibble)
+require(knitr)
+require(kableExtra)
+require(readr)
+require(ggplot2)
+require(forcats)
+require(table1)
+require(plotly)
+require(RColorBrewer)
+require(purrr)
+require(ggridges)
+
+config("db_trace", FALSE) # Prevent query plan output
+
+options(scipen = 999)
+```
+
+```{r configsetc}
+site_report_config <-
+  read_csv("../specs/site_report_config.csv", col_types = "cccc")
+
+site_colors <-
+  site_report_config %>%
+  add_site_labels() %>%
+  select(site, site_color) %>%
+  tibble::deframe()
+
+site_linetypes <-
+  site_report_config %>%
+  add_site_labels() %>%
+  select(site, site_linetype) %>%
+  tibble::deframe()
+
+sites <- get_site_refs(site_report_config)
+```
+
+Please treat the contents of this report as confidential and do not redistribute.
+
+# Introduction
+
+This report summarizes data returned for the first PRESERVE row level query which was distributed to and executed by participating sites in April/May 2022. The query was executed against PCORnet 6.0 Cycle 11, Refresh 2 (corresponding to PEDSnet database v4.5). The focus is characterization of a computational phenotype of mild-to-moderate chronic kidney disease (CKD) and a limited set of variables for the PRESERVE study.
+
+The goals of the report are to identify potential data quality issues and areas for remediation. The report focuses on the following elements which were identified as critical for the PRESERVE research analyses:
+
+-   Identification of patients meeting criteria for a computational phenotype of mild-to-moderate CKD (Sections \@ref(cohort-definition) and \@ref(demographics))
+
+-   Cohort entry and patient record counts across the study period of January 2009 to December 2021 (Section \@ref(cohort-entry-date-ced) and \@ref(longitudinal-patient-record-counts))
+
+-   Encounters with a nephrology provider or at a nephrology facility (Section \@ref(nephrology-specialty))
+
+-   Anti-hypertensive medication exposure (Section \@ref(anti-hypertensive-medications))
+
+-   Estimated glomerular filtration rate (Section \@ref(egfr))
+
+-   Urine protein measurements (Section \@ref(urine-protein-measurements))
+
+-   Chronic dialysis, renal transplant, and ambulatory blood pressuring monitoring procedures (Section \@ref(procedures))
+
+-   Adverse event diagnoses (\@ref(adverse-events))
+
+-   Blood pressure measurements (Section \@ref(blood-pressure-measurements))
+
+-   Geographic variables associated with patient addresses (Section \@ref(geographic-variables))
+
+Please note the following:
+
+-   Data quality analyses are restricted to patients who meet criteria for a computational phenotype of mild-to-moderate CKD.
+
+-   Where this report mentions outliers and anomalous distributions, these are identified via visual inspection.
+
+-   Patient counts greater than zero but fewer than 11 patients are suppressed to limit risks to patient privacy.
+
+-   Observations in this report may incompletely predict observations made during the study.
+
+```{r fetchdata}
+with_visits <- get_results('with_visits')
+visit_types <- get_results('visit_types')
+visits_per_person <- get_results('visits_per_person')
+nofacts <- get_results('nofacts')
+diagnoses_per_person <- get_results('diagnoses_per_person')
+conditions_per_person <- get_results('conditions_per_person')
+meds_per_person <- get_results('meds_per_person')
+vitals_per_person <- get_results('vitals_per_person')
+labs_per_person <- get_results('labs_per_person')
+procedures_per_person <- get_results('procedures_per_person')
+nephrology_encounters <- get_results('nephrology_encounters') %>% 
+  mutate(encounter_type = fct_relevel(encounter_type, 'neither', 'nephrology_facility',
+                                      'nephrology_provider', 'both'))
+neph_providers <- get_results('neph_providers')
+neph_clinic <- get_results('neph_clinic')
+clinics <- get_results('clinics')
+visit_specialty_cts_tbl <- get_results('visit_specialty_cts')
+visits_spec_prop <- get_results('visits_spec_prop')
+visits_urine_protein_tbl <- get_results('visits_urine_protein')
+visits_rx_tbl <- get_results('visits_rx')
+visits_bp_tbl <- get_results('visits_bp')
+ae_conditions_tbl <- get_results('ae_conditions')
+egfr_medians_tbl <- get_results('egfr_medians')
+egfr_site_medians_tbl <- get_results('egfr_site_medians')
+attrition_cohort <- cdm_tbl('attrition_cohort')
+
+cohort_ah_rx <- get_results('med_ah_rx_first')
+
+# Defer collection due to need for join to large table
+cohort_htn_dx <- results_tbl("htn_dx_cohort") %>% 
+  distinct(patid) %>% 
+  mutate(htn_dx = "htn_dx")
+
+# Defer collection due to large size of table
+cohort_bp <- results_tbl('bp_completeness') %>% add_site_labels(defer_collect = TRUE)
+
+cohort_ah_rx_time <- get_results('med_ah_rx_time')
+cohort_ah_rx_any <- get_results('med_ah_rx_prop') %>% filter(ever==1) 
+cohort_ah_rx_any_postced <- results_tbl('med_ah_rx_postce_prop') %>%
+  filter(ever == 1) %>% collect_new() %>% add_site_labels()
+  
+address_history_site <- get_results('address_history_site')
+address_history_cohort <- get_results('address_history_cohort')
+
+cohort_bp_corr <- get_results('cohort_bp_corr')
+cohort_bp_sample <- get_results('cohort_bp_sample')
+cohort_bp_sample2 <- get_results('cohort_bp_sample2')
+# get results
+up_qual <- get_results("qualitative_urine_protein_cts")
+drugs <- get_results("rx_htn")
+low_by_site <- map(.x = as.list(seq(10L, 90L, by = 10L)),
+                   .f = function (x) {
+                   get_results(paste0('egfr_low_frac_', x)) %>%
+                       mutate(threshold = local(x))
+                     }) %>%
+  reduce(.f = dplyr::union)
+egfr_days_sep_cts <- get_results('egfr_days_sep_cts')
+htn_dx_intersection_summary <- get_results('htn_dx_intersection_summary')
+htn_meas_intersection_summary <- get_results('htn_meas_intersection_summary')
+uprot_test_cts <- get_results('uprot_test_cts')
+# for larger files
+up_quant <- results_tbl("quantitative_urine_protein") %>% add_site_labels(defer_collect = TRUE)
+egfr_bounded <- results_tbl("egfr_bounded") #%>% add_site_labels(defer_collect = TRUE)
+egfr_plot_df <- make_egfr_dq_df() %>% add_site_labels(defer_collect = TRUE)
+attrition_cohort_collected <- attrition_cohort %>% collect_new()
+cro_time_to_event <- get_results('cro_time_to_event') %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+px_chronic_dialysis <- read_codeset("px_chronic_dialysis")
+px_kidney_transplant <- read_codeset("px_kidney_transplant")
+px_abpm <- read_codeset("px_abpm")
+chronic_dialysis_consec_px <- get_results("chronic_dialysis_consec_px")  %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+chronic_dialysis_any_px <- get_results("chronic_dialysis_any_px")  %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+kidney_dialysis_any_px <- get_results("kidney_dialysis_any_px")  %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+kidney_transplant_px <- get_results("kidney_transplant_px")  %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+abpm_any_px <- get_results("abpm_any_px")  %>%
+  inner_join(select(attrition_cohort_collected, ce_date, patid), by = "patid")
+```
+
+```{r getaggdata}
+config('results_schema', 'preserve_rl1_agg')
+config('results_name_tag', '')
+# Attrition
+attrition <- get_results("attrition")
+# Demographics / Table 1 type info
+dem_birth_yr <- get_results("dem_birth_yr")
+
+config('results_name_tag', '_preserve_138')
+config('results_schema', 'dq2_output')
+
+# Quick fix for suppressing small cell sizes
+attrition_step0 <- attrition %>% 
+  filter(step_num == 0) %>% 
+  rename(step0 = counts) %>% 
+  select(site, step0)
+
+attrition_step3 <- attrition %>% 
+  filter(step_num == 3) %>% 
+  rename(step3 = counts) %>% 
+  select(site, step3)
+
+
+attrition <- attrition %>%
+  left_join(attrition_step0, by = "site") %>%
+  left_join(attrition_step3, by = "site") %>%
+  group_by(site) %>%
+  mutate(
+    counts = if_else(counts < 11 & counts > 0, 10, counts),
+    percent_prior_step = 100 * counts / lag(counts),
+    percent_step0 = 100 * counts / step0,
+    percent_step3 = 100 * counts / step3
+  ) %>%
+  ungroup()
+
+
+demographics <- cdm_tbl("demographic") %>%
+  inner_join(select(attrition_cohort, patid, ce_date), by = "patid") %>% 
+  collect_new() %>% add_site_labels()
+attrition_cohort_by_site <- attrition_cohort %>% 
+  group_by(site) %>% 
+  summarize(total_patids = n_distinct(patid)) %>%
+  ungroup() %>% 
+  collect_new() %>% add_site_labels()
+urine_protein_summary_lab_type <- load_codeset("lab_urine_protein_quant") %>%
+  mutate(lab_type = "quant") %>%
+  dplyr::union(load_codeset("lab_urine_protein_qual") %>%
+                 mutate(lab_type = "qual")) %>%
+  inner_join(cdm_tbl("lab_result_cm"),
+             by = c("concept_code" = "lab_loinc")) %>%
+  inner_join(cdm_tbl("attrition_cohort"), by = c("patid", "site")) %>%
+  group_by(site, lab_type) %>%
+  summarize(n_pats = n_distinct(patid),
+            n_meas = n_distinct(lab_result_cm_id)) %>%
+  ungroup() %>%
+  collect_new() %>% add_site_labels()
+urine_protein_summary_any <- load_codeset("lab_urine_protein_quant") %>%
+  mutate(lab_type = "any") %>%
+  dplyr::union(load_codeset("lab_urine_protein_qual") %>%
+                 mutate(lab_type = "any")) %>%
+  inner_join(cdm_tbl("lab_result_cm"),
+             by = c("concept_code" = "lab_loinc")) %>%
+  inner_join(cdm_tbl("attrition_cohort"), by = c("patid", "site")) %>%
+  group_by(site, lab_type) %>%
+  summarize(n_pats = n_distinct(patid),
+            n_meas = n_distinct(lab_result_cm_id)) %>%
+  ungroup() %>%
+  collect_new() %>% add_site_labels()
+urine_protein_summary <- urine_protein_summary_lab_type %>% 
+  dplyr::union(urine_protein_summary_any)
+urine_protein <- load_codeset("lab_urine_protein_quant") %>%
+  mutate(lab_type = "quant") %>%
+  dplyr::union(load_codeset("lab_urine_protein_qual") %>%
+                 mutate(lab_type = "qual")) %>%
+  inner_join(cdm_tbl("lab_result_cm"),
+             by = c("concept_code" = "lab_loinc")) %>%
+  inner_join(cdm_tbl("attrition_cohort"), by = c("patid", "site"))%>% compute_new()
+```
+
+# Cohort definition
+
+Sites were able to address data quality issues identified in the first data quality report which were resulting in anomalous counts in the attrition. For Site A, some issues persist for identifying specialty visits. For the attrition counts in this section, these were addressed with a site-provided list of nephrology providers.
+
+```{r attrdata}
+all_site_attrition_count <- attrition %>%
+  group_by(step_num) %>%
+  summarize(all_site_count = sum(counts)) %>%
+  ungroup() %>%
+  filter(step_num == 10) %>%
+  pull(all_site_count)
+
+all_site_attrition_count_text <- all_site_attrition_count %>%
+  scales::comma()
+```
+
+## Computational phenotype for mild-to-moderate CKD
+
+0.  Patients with \>=1 visit between January 2009 and December 2021
+
+1.  Patients with \>=1 in-person visit between January 2009 and December 2021
+
+2.  Patients with \>=1 serum creatinine measurement
+
+3.  Patients aged \>=1 and \< 18 at time of \>=1 serum creatinine measurement
+
+4.  Patients with height measurement available \<=90 days of serum creatinine value (aged \>=1 and \< 18)
+
+5.  Patients with \>=1 estimated glomerular filtration rate (eGFR) value \>=30 and \<=90 mL/min/1.73m2 (aged \>=1 and \< 18)
+
+6.  Patients with \>=2 eGFRs \>=30 and \<=90 mL/min/1.73m2 which are \>=90 days apart (aged \>=1 and \< 18)
+
+7.  Patients with \>=2 eGFRs \>=30 and \<=90 mL/min/1.73m2 which are \>=90 days apart, without an intervening eGFR value \>= 90 mL/min/1.73m2 (aged \>=1 and \< 18)
+
+8.  Exclude patients with no in-person visits with a nephrology provider at any time between January 2009 and December 2021
+
+9.  Exclude patients with \>=1 chronic dialysis procedure on or before cohort entry date
+
+10. Exclude patients with \>=1 kidney transplant procedure on or before cohort entry date
+
+Notes:
+
+-   The cohort entry date (CED) is defined as the date of the first eGFR of the earliest pair of eGFRs \>=30 & \<=90 mL/min/1.73m2 aged \>=1 and \< 18, separated by \>=90 days, without an intervening eGFR \>=90
+-   The CKiD U25 serum creatinine formula is used to compute estimated glomerular filtration rate (eGFR), with a 180 day look-around for height measurements.
+-   Definitions were corrected in this report to include patients with eGFR values \<=90 mL/min/1.73m2 (from \<=89 mL/min/1.73m2 in the first data quality report)
+
+```{r attr}
+attrition %>%
+  select(step_num, counts, site) %>%
+  pivot_wider(names_from = site,
+              values_from = counts,
+              values_fill = 0) %>%
+  prettify_kable(table_caption = "Attrition: Patient counts")
+```
+
+```{r attrplotstep0log, fig.cap = "Attrition: Percentage patients with >=1 visit between January 2009 and December 2021"}
+attrition %>%
+  ggplot(aes(x = step_num, y = percent_step0, color = site, linetype = site)) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(trans = "log2", labels = scales::comma,
+                     breaks = c(0.01, 0.1, 1, 5, 25, 100),
+                     limits = c(0.01,100)) +
+  preserve_dq2_plot() +
+  scale_color_manual(values = site_colors,                      breaks = attrition %>% distinct(site) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,                      breaks = attrition %>% distinct(site) %>% pull()) +
+  theme(legend.position = "bottom", legend.key.width = unit(1, "cm")) +
+  ylab("Percentage step 0 (logarithmic scale)") +
+  xlab("Attrition step") +
+  labs(color = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(0, 10, by = 1))
+```
+
+Some sites are pediatric-specific whereas others include adult and pediatric patients in their source populations. Step 3, which restricts to patients aged \>=1 and \< 18 at time of \>=1 serum creatinine measurement, implements an age requirement. Examining the attrition as a proportion of Step 3 reduces variation due to differences in age range of source population, see Figure \@ref(fig:attrstep3plot).
+
+```{r attrstep3plot, fig.cap="Attrition: Percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement"}
+attrition %>%
+  ggplot(aes(
+    x = step_num,
+    y = percent_step3,
+    color = site,
+    linetype = site
+  )) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(trans = "log2", labels = scales::comma,
+                     breaks = c(0.01, 0.1, 1, 5, 25, 100),
+                     limits = c(0.01,100)) +
+  preserve_dq2_plot() +
+  scale_color_manual(values = site_colors,
+                     breaks = attrition %>% distinct(site) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,
+                        breaks = attrition %>% distinct(site) %>% pull()) +
+  theme(legend.position = "bottom",
+        legend.key.width = unit(1, "cm")) +
+  ylab("Percentage step 3 (logarithmic scale)") +
+  xlab("Attrition step") +
+  labs(color = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(3, 10, by = 1), limits = c(3, 10))
+```
+
+```{r attrredprev}
+attrition %>%
+  mutate(percent_red = 100 - percent_prior_step) %>% 
+  select(step_num, percent_prior_step, site) %>%
+  filter(step_num >= 2) %>% 
+  pivot_wider(names_from = site,
+              values_from = percent_prior_step,
+              values_fill = 0) %>% 
+  prettify_kable(table_caption = "Attrition table: Percentage previous attrition step")
+```
+
+# Demographics
+
+Table [A](#tab:demtable) summarizes demographic characteristics for the cohort. Site B has an anomalously low proportion of patients in the attrition cohort with race recorded as Asian (not shown below due to small cell sizes). Categories with \<11 patients suppressed to 0 for two race categories at Site C.
+
+```{r demographics, R.options = list(width = 500)}
+demographics %>%
+  mutate(age_at_ced = as.numeric(ce_date - birth_date)/365.25) %>%
+  parse_race() %>%
+  parse_ethnicity() %>%
+  mutate(sex = case_when(sex == "F" ~ "Female",
+                         sex == "M" ~ "Male",
+                         TRUE ~ "Other")) %>% 
+  filter(
+    !(
+      (site == "B") & race == "American  Indian  or  Alaska  Native /
+      Asian /
+      Native  Hawaiian  or  Other  Pacific  Islander /
+      Multiple  race"
+    ),!(
+      (site == "A") &
+        race == "Refuse  to  answer / Other / No  information / Unknown"
+    )
+  ) %>%
+  rename(Race = race,
+         Hispanicity = hispanic,
+         Sex = sex,
+         `Age at cohort entry` = age_at_ced) %>%
+  table1(
+    ~ Sex + Race + Hispanicity + `Age at cohort entry` | toupper(site),
+    data = .,
+    render.categorical = my.render.cat,
+    render.continuous = my.render.cont,
+    caption = "<p id='tab:demtable'> Table A: Demographic characteristics</p>",
+    footnote = "Categories for race combined in table above due to small cell sizes."
+  )
+```
+
+# Cohort entry date (CED)
+
+The CED is defined as the date of the first eGFR of the earliest pair of eGFRs \>=30 & \<=90 mL/min/1.73m2 aged \>=1 and \< 18, separated by \>=90 days, without an intervening eGFR \>=90.
+
+Figures \@ref(fig:chtpermonth) and \@ref(fig:chtpermonthprop) visualize the patient count and proportion cohort entering the cohort by month, respectively. The sharp decrease early 2020 is likely attributable to the COVID-19 pandemic. Site B numbers do not appear to recover from this sharp decrese in early 2020. As anticipated, sites C, D, E, F, and G have minimum CEDs after 2009.
+
+```{r chtpermonth, fig.cap="Count patients entering cohort per month"}
+egfr_plot_df %>%
+  ggplot(aes(
+    x = mo_yr_date,
+    y = pts_after_ce_in_month,
+    color = site,
+    linetype = site
+  )) +
+  geom_line() +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors) +
+  ylab("N patients") +
+  xlab("Date") +
+  theme(axis.text.y = element_blank())
+```
+
+```{r chtpermonthprop, fig.cap="Proportion cohort entering per month"}
+egfr_plot_df %>%
+  inner_join(attrition_cohort_by_site, by = "site") %>% 
+  ggplot(aes(
+    x = mo_yr_date,
+    y = pts_after_ce_in_month/total_patids,
+    color = site,
+    linetype = site
+  )) +
+  geom_line() +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors) +
+  ylab("Proportion cohort") +
+  xlab("Date") +
+  theme(axis.text.y = element_blank())
+```
+
+Figures \@ref(fig:proportionvisitsspecsop) and \@ref(fig:proportionvisitsspecsip) display the mean number of visits per patient before and after CED by specialty for outpatient and inpatient visits, respectively. Generally, there is an increased number of outpatient visits after CED, especially for nephrology. Site H has an anomalously large number of inpatient visits. Site G has limited availability of non-nephrology specialty information. Site A is excluded from these figures due to missingness for provider and facility information in the data returned for the first row level query.
+
+```{r proportionvisitsspecsop, fig.cap="Average number of outpatient visits per patient before and after CED, stratified by visit specialty"}
+
+visit_specialty_cts_tbl_grps <- visit_specialty_cts_tbl
+visit_specialty_cts_tbl_grps$enc_timing <- factor(visit_specialty_cts_tbl$enc_timing, levels=c('ce_prior','ce_on_after'))
+specialty_names <- c(
+  "cardiology" = "Cardiology",
+  "family_med_or_peds" = "Family medicine/Pediatrics",
+  "heme_onc" = "Hematology/Oncology",
+  "nephrology" = "Nephrology",
+  "not_available" = "Specialty unavailable",
+  "urology" = "Urology"
+)
+
+ggplot(
+  visit_specialty_cts_tbl_grps %>% filter(enc_type == 'AV' |
+                                            enc_type == 'OA',!sc == "other_specialty"),
+  aes(x = site, y = visits_strat_per_pt, fill = enc_timing)
+) +
+  geom_bar(stat = 'identity', position = 'dodge')  +
+  facet_wrap(~ sc, labeller = as_labeller(specialty_names)) +
+  preserve_dq2_plot(legend = TRUE) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  ))  +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  xlab("Site") +
+  ylab("Median visits per patient")
+  
+```
+
+```{r proportionvisitsspecsip, fig.cap="Average number of inpatient visits per patient before and after CED"}
+
+
+ggplot(visit_specialty_cts_tbl_grps %>% filter(enc_type=='IP',
+                                               !sc == "other_specialty"), aes(x=site, y = visits_strat_per_pt,fill=enc_timing)) +
+  geom_bar(stat='identity', position='dodge') +
+  preserve_dq2_plot(legend = TRUE) +
+  facet_wrap(~ sc, labeller = as_labeller(specialty_names)) +
+  theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1))  +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  xlab("Site") +
+  ylab("Median visits per patient")
+
+```
+
+Figure \@ref(fig:proportionvisitsspecs) plots the number of visits per patient before and after CED for specialties of interest. As above, generally, there is an increased number of outpatient visits after CED, especially for nephrology.
+
+```{r proportionvisitsspecs, fig.width=12, fig.height=12, fig.cap = "Number of visits before and after CED by specialty"}
+spec_long <-visits_spec_prop %>% pivot_longer(c(ce_on_after,ce_prior),
+                                                    names_to='ce_status',
+                                                    values_to='count')
+
+spec_long$ce_status <- factor(spec_long$ce_status, levels=c('ce_prior','ce_on_after')) 
+
+spec_long %>%
+  filter(count <= 30,
+                                               !sc == "other_specialty") %>%
+  ggplot(aes(x = site, y = count, fill = ce_status)) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  facet_wrap(~ sc, labeller = as_labeller(specialty_names)) + coord_flip() + theme(text = element_text(size = 20)) +
+  preserve_dq2_plot(legend = TRUE) +
+  labs(caption = "Counts > 30 removed") +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  xlab("Site") +
+  ylab("Number of visits per patient") +
+  theme(axis.text.x = element_blank())
+```
+
+# Longitudinal patient record counts
+
+Figure \@ref(fig:visitstemporal2) displays the percent cohort with emergency, inpatient, outpatient and other encounter types per year among patients with at least one visit that year. Site F has an anomalously high percent with emergency visits. Sites H and I have an anomalously high percent with inpatient visits. The increase in telehealth visits in early 2020 is likely attributable to the COVID-19 pandemic. Site H has an anomalously high proportion of telehealth visits compared to other sites. Site L has an increase in other encounter types and a decrease in outpatient encounter types starting in 2017. Site M has a sharp increase in other encounter types starting in 2019.
+
+```{r visitstemporal2, fig.cap="Percent cohort with encounter type per year"}
+visit_type_names <- c("emergency" = "Emergency",
+                      "emergency->inpatient" = "Emergency to Inpatient",
+                      "inpatient" = "Inpatient",
+                      "other" = "Other",
+                      "outpatient" = "Outpatient",
+                      "telehealth" = "Telehealth")
+
+## visits_temporal
+ggplot(
+  visit_types,
+  aes(
+    x = year,
+    y = percent_patients,
+    color = site,
+    linetype = site
+  )
+) +
+  geom_line() +
+  facet_wrap(~ visit_type,
+             labeller = as_labeller(visit_type_names),
+             scales = "free_y") +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  preserve_dq2_plot(legend = TRUE) +
+  xlab("Year") +
+  ylab("Percent cohort")
+```
+
+Figure \@ref(fig:visitstemporal3) displays the median encounters per patient after cohort entry, stratified by encounter type. Site H has an anomalously high number of inpatient visits per patient.
+
+```{r visitstemporal3, fig.cap="Median encounters per patient after cohort entry"}
+## visits_temporal
+ggplot(visits_per_person, aes(x = year, y = median_visits, group = site)) + geom_line(aes(color =
+                                                                                            site, linetype = site)) + ylab('Median Visits Per Patient') + scale_x_continuous(limits = c(2009, 2021)) +
+  facet_wrap( ~ visit_type,
+              labeller = as_labeller(visit_type_names),
+              scales = "free_y") +
+  preserve_dq2_plot(legend = TRUE) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)  +
+  xlab("Year") +
+  ylab("Percent cohort")
+```
+
+Figure \@ref(fig:visitsnofacts4) displays the percent encounters not associated with a diagnosis, procedure, condition, vital, or lab. Site H is anomalous for emergency, inpatient, and outpatient visits. M has increased emergency visits without facts in 2020 and 2021.
+
+```{r visitsnofacts4, fig.cap="Percent encounters that were not associated with a diagnosis, procedure, condition, vital, or lab"}
+## visits_nofacts
+ggplot(nofacts, aes(x = year, y = percent_nofacts, group = site)) + geom_line(aes(color =
+                                                                                    site, linetype = site)) +
+  ylab('Percent without facts') + scale_x_continuous(limits = c(2009, 2021)) +
+  facet_wrap( ~ visit_type,
+              labeller = as_labeller(visit_type_names),
+              scales = "free_y") +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  xlab("Year") +
+  ylab("Percent encounters without facts")
+```
+
+Figures \@ref(fig:ipfufacts5) through \@ref(fig:ipfufacts10) below plot the median number of records per patient across DIAGNOSIS, CONDITION, MED_ADMIN, PRESCRIBING, VITALS, PROCEDURES, and LAB_RESULT_CM tables. The following anomalous distributions are noted:
+
+-   DIAGNOSIS: Sites I and C have high values compared to other sites.
+
+-   MED_ADMIN: Sites H, B and C have high values compared to other sites.
+
+-   PRESCRIBING: Site H has high values compared to other sites. Site M has low values compared to other sites.
+
+-   VITALS: Sites H, I, and B have high values compared to other sites.
+
+-   PROCEDURES: Substantial variation across sites.
+
+-   LAB_RESULT_CM: Site H has high values compared to other sites. Site B has low values compared to other sites.
+
+
+```{r ipfufacts5, fig.cap="Median diagnoses per patient"}
+## ip_fu_facts
+ggplot(diagnoses_per_person, aes(x = year, y = median_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts6, fig.cap="Median conditions per patient"}
+## ip_fu_facts
+ggplot(conditions_per_person, aes(x = year, y = median_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021))  +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts7a, fig.cap="Median medications dispensed per patient", include = FALSE}
+## ip_fu_facts
+ggplot(meds_per_person, aes(x = year, y = median_dispensed_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts7b, fig.cap="Median medications administered per patient"}
+## ip_fu_facts
+ggplot(meds_per_person, aes(x = year, y = median_administered_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021))  +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts7c, fig.cap="Median medications prescribed per patient"}
+## ip_fu_facts
+ggplot(meds_per_person, aes(x = year, y = median_prescribed_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021))  +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts8, fig.cap="Median vitals per patient"}
+## ip_fu_facts
+ggplot(vitals_per_person, aes(x = year, y = median_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts9, fig.cap="Median procedures per patient"}
+## ip_fu_facts
+ggplot(procedures_per_person, aes(x = year, y = median_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021))  +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+```{r ipfufacts10, fig.cap="Median labs per patient"}
+## ip_fu_facts
+ggplot(labs_per_person, aes(x = year, y = median_per_person, group = site)) + geom_line(aes(color = site, linetype = site)) + scale_x_continuous(limits = c(2009, 2021)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes)+
+  ylab("Median per patient") +
+  xlab("Year")
+```
+
+# Nephrology specialty {#nephrology-specialty}
+
+Figure \@ref(fig:attrstep8) depicts the percentage previous step at attrition Step 8, which implements a nephrology visit criterion. As noted above, For site B some issues persist for identifying specialty visits. For the attrition counts in this section, these were addressed with a site-provided list of nephrology providers. For other analyses of specialty visit data, Site A is missing. Sites L and M have higher percentages than other sites
+
+```{r attrstep8, fig.cap="Step 8: Percentage previous attrition step"}
+attrition %>%
+  mutate(percent_red = 100 - percent_prior_step) %>%
+  select(step_num, percent_prior_step, site) %>%
+  filter(step_num == 8) %>%
+  mutate(
+    cluster = case_when(
+      percent_prior_step < 5 ~ "1.",
+      percent_prior_step < 40 &
+        percent_prior_step >= 5 ~ "2.",
+      percent_prior_step >= 40 ~ "3."
+    )
+  ) %>%
+  ggplot(aes(
+    x = site,
+    y = percent_prior_step,
+    label = round(percent_prior_step, digits = 1)
+  ))  +
+  scale_fill_grey() +
+  xlab("Site") +
+  ylab("Percentage previous attrition step") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(panel.background = element_rect(color="black",size=1),
+        panel.grid = element_blank()) +
+  geom_col(alpha = 0.75, position = position_dodge()) +
+  facet_grid(. ~ cluster, scales = "free_x", space = "free") +
+  geom_label(fill = "white")
+```
+
+Exploration of row level data for a broad CKD cohort indicates that specialty information for site B is completely missing for both provider and specialty.
+
+```{r, include = FALSE}
+cdm_tbl("provider") %>% 
+  filter((site == "B")) %>% 
+  collect() %>%
+  mutate(providerid = as.factor(providerid),
+         provider_specialty_primary = as.factor(provider_specialty_primary),
+         raw_provider_specialty_primary = as.factor(raw_provider_specialty_primary),
+         site = as.factor(site)) %>% 
+  summary()
+
+cdm_tbl("provider") %>% 
+  filter((site == "B"),
+         (str_detect(toupper(provider_specialty_primary), "207RN0300X") |
+           str_detect(toupper(raw_provider_specialty_primary), "2080P0210X")))
+
+cdm_tbl("provider") %>%
+  filter((site == "B")) %>%
+  group_by(provider_specialty_primary) %>% 
+  summarize(n_providers = n_distinct(providerid)) %>% 
+  ungroup() %>% 
+  prettify_kable()
+
+cdm_tbl("encounter") %>% 
+  filter((site == "B")) %>%
+  group_by(facility_type) %>% 
+  summarize(n_facilities = n_distinct(facilityid)) %>% 
+  ungroup() %>% 
+  prettify_kable()
+
+cdm_tbl("encounter") %>% 
+  filter((site == "B")) %>%
+  group_by(raw_facility_type) %>% 
+  summarize(n_facilities = n_distinct(facilityid)) %>% 
+  ungroup()
+```
+
+Figure \@ref(fig:providerfacility11) displays the proportion outpatient encounters associated with either a nephrology provider, nephrology facility, or both. Figures \@ref(fig:providerfacility12) and \@ref(fig:providerfacility13) show the percentage outpatient encounters associated with a nephrology provider and nephrology facility, respectively, over time. Figure \@ref(fig:facility14) depicts the number of encounters per facilityid for nephrology facilities. As anticipated, there is variation in the extent to which sites rely on provider and/or facility to record specialty information and several sites do not have any nephrology facility information recorded.
+
+
+```{r providerfacility11, fig.cap="Proportion outpatient encounters associated with a nephrology provider, nephrology facility, both, or neither"}
+## provider_facility
+ggplot(nephrology_encounters, aes(fill = encounter_type, y = n, x = site)) +
+  geom_bar(position = "fill", stat = "identity") +
+  ylab('Proportion total encounters') +
+  xlab("Site") +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  facet_wrap(~ visit_type,
+             labeller = as_labeller(visit_type_names)) +
+  coord_flip() +
+  scale_fill_discrete(
+    labels = c("neither" = "Non-nephrology",
+               "both" = "Both nephrology provider and nephrology facility",
+               "nephrology_provider" = "Nephrology provider",
+               "nephrology_facility" = "Nephrology facility"),
+    name = "Encounter specialty",
+    type = c("grey", "orange", "blue", "purple")
+  )
+  
+```
+
+```{r providerfacility12, fig.cap="Percent outpatient encounters associated with a nephrology provider"}
+## provider_facility
+ggplot(neph_providers,
+       aes(x = year, y = percent_nephrology_provider, group = site)) + geom_line(aes(color = site, linetype = site))  +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  facet_wrap( ~ visit_type,
+              labeller = as_labeller(visit_type_names)) +
+  ylab("Percent encounters") +
+  xlab("Year")
+```
+
+```{r providerfacility13, fig.cap="Percent of outpatient encounters associated with a nephrology facility"}
+## provider_facility
+ggplot(neph_clinic, aes(x=year, y=percent_nephrology_clinic, group = site)) + geom_line(aes(color = site, linetype = site)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  facet_wrap(~ visit_type,
+             labeller = as_labeller(visit_type_names)) +
+  ylab("Percent encounters") +
+  xlab("Year")
+```
+
+```{r facility14, fig.cap="Number of encounters by facilityid of nephrology facilities"}
+## Facility
+clinics %>%
+  arrange(desc(number_encounters)) %>%
+  mutate(number_encounters =
+           ifelse(number_encounters < 11, 10, number_encounters)) %>%
+  ggplot(aes(x = facilityid, y = number_encounters, fill = visit_type)) +
+  geom_col() +
+  facet_wrap( ~ site, scales = "free_y") +
+  preserve_dq2_plot(legend = TRUE) +
+  coord_flip() +
+  theme(axis.text.y = element_blank()) +
+  xlab("Unique nephrology facility ID") +
+  ylab("N encounters")
+```
+
+# Medications
+
+## Anti-hypertensive Medications
+
+Figures \@ref(fig:ahrxtimeplot2) and \@ref(fig:ahrxfirstplot) depict the timeframe of initial anti-hypertensive medication exposure compared to CED. A negative value on the x axis indicates that patients were exposed to an anti-hypertensive prior to cohort entry.
+
+```{r ahrxtimeplot2, fig.cap="Anti-hypertensive medications over time since CED"}
+ggplot(cohort_ah_rx,
+       aes(x = time_to_rx/365.25,
+           y = site)) +
+  geom_boxplot(outlier.size = 1, outlier.alpha = 0.5) +
+  preserve_dq2_plot(legend = TRUE) +
+  xlab("Time between CED and first anti-HTN medication (years)") +
+  ylab("Site")
+```
+
+```{r ahrxfirstplot, fig.cap="Time between cohort entry and first prescription of anti-hypertensive medication"}
+ggplot(cohort_ah_rx, aes(x = time_to_rx_years)) +
+  geom_density() +
+  facet_wrap( ~ site, scales = "free_y") +
+  preserve_dq2_plot()  +
+  xlab("Time between CED and first anti-HTN medication (years)") +
+  ylab("Proportion")
+```
+
+Figure \@ref(fig:ahrxeverplot) depicts the proportion of patients on anti-hypertensive medications at any time, whereas figure \@ref(fig:ahrxpostcedplot) depicts the proportion of patients on anti-hypertensive medications before or after CED. Site H has an anomalous distribution for which a larger proportion of the cohort receive their first anti-hypertensive medication prior to cohort entry than post-cohort entry.
+
+```{r ahrxeverplot, fig.cap="Proportion of patients on anti-hypertensive medications at any time"}
+ggplot(cohort_ah_rx_any, aes(x=site, y=prop_pats)) +
+  geom_bar(stat='identity') +
+  preserve_dq2_plot() +
+  scale_fill_grey() +
+  xlab("Site") +
+  ylab("Proportion cohort") +
+  ylim(0, 1)
+```
+
+```{r ahrxpostcedplot, fig.cap="Proportion of patients with first exposure to anti-hypertensive after CED"}
+cohort_ah_rx %>%
+  filter(ever == 1L) %>% 
+  mutate(
+    timing = case_when(
+      is.na(min_date) ~ "timing_unavailable",
+      ever == 1 &
+        min_date >= ce_date ~ "ce_on_after",
+      ever == 1 &
+        min_date >= ce_date ~ "ce_on_after",
+      min_date < ce_date ~ "ce_prior",
+      TRUE ~ "other"
+    )
+  ) %>%
+  group_by(site, timing) %>%
+  summarize(n_pats = n_distinct(patid)) %>%
+  ungroup() %>%
+  inner_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(prop_pats = n_pats/total_patids) %>%
+  mutate(timing = factor(timing, levels=c('ce_prior','ce_on_after'))) %>%
+  ggplot(aes(x = site, y = prop_pats, fill = timing)) +
+  geom_bar(stat = 'identity', position = "dodge") +
+  preserve_dq2_plot(legend = TRUE) +
+  theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1)) +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing",
+    type = c("black", "darkgrey")
+  )  +
+  xlab("Site") +
+  ylab("Proportion cohort") +
+  ylim(0, 1)
+```
+
+Table [B](#tab:ahrxfirsttable) summarizes time between cohort entry and first prescription of anti-hypertensive medication. As noted above, Site H has an anomalous distribution for which a larger proportion of the cohort receive their first anti-hypertensive medication prior to cohort entry than post-cohort entry.
+
+```{r fig.width=20}
+cohort_ah_rx %>% 
+  rename(`Time between CED and first anti-HTN drug exposure (years)` = time_to_rx_years) %>% 
+table1(~`Time between CED and first anti-HTN drug exposure (years)`|toupper(site),
+       data=.,
+       render.categorical=my.render.cat, render.continuous=my.render.cont,
+       caption = "<p id='tab:ahrxfirsttable'> Table B: Time to First Anti-hypertensive Exposure</p>")
+```
+
+# Lab measurements
+
+## eGFR
+
+The CKiD U25 serum creatinine formula is used to compute estimated glomerular filtration rate (eGFR), with a 180 day look-around for height measurements.
+
+Figure \@ref(fig:egfrovertime1) plots median eGFR across time, stratifying by before or after CED. The convergence between before and after values in more recent years at most sites may be due to reduced post-CED follow-up for those patients (during which time we would expect to see eGFR decline) due to the study period. Figure \@ref(fig:egfrovertime2) plots median eGFR across years since CED. As years since cohort entry increases, cohort size decreases, and as such distributions exhibit greater variability.
+
+```{r egfrovertime1, fig.cap = "Median eGFR per calendar year before or after CED"}
+egfr_site_medians_tbl$event_date <- factor(egfr_site_medians_tbl$event_date, levels=c('ce_prior','ce_on_after'))
+
+ggplot(egfr_site_medians_tbl, aes(x=meas_year, y = site_median,group=event_date,color=event_date)) +
+  geom_line() + facet_wrap(~ site) +
+  theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1)) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  ylab("Median eGFR")
+
+```
+
+```{r egfrovertime2, fig.cap = "Median eGFR per calendar year before or after CED"}
+egfr_fu_post_ced <- egfr_bounded %>%
+  mutate(fu_post_ced_days = floor((comb_lab_date - ce_date)),
+         fu_post_ced_months = floor(fu_post_ced_days / (365.25/12)),
+         fu_post_ced_quarters = floor(fu_post_ced_days / (365.25/4)),
+         u_post_ced_years = floor(fu_post_ced_days / (365.25))) %>%
+  group_by(site, patid, fu_post_ced_months) %>%
+  summarize(median_egfr = median(egfr),
+            min_egfr = min(egfr)) %>%
+  ungroup() %>%
+  collect_new()
+
+egfr_fu_post_ced %>%
+  group_by(site, fu_post_ced_months) %>%
+  summarize(median_egfr = median(min_egfr)) %>%
+  ungroup() %>% add_site_labels() %>% 
+  ggplot(aes(
+    x = fu_post_ced_months/12,
+    y = median_egfr,
+    linetype = site,
+    color = site
+  )) +
+  geom_line() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_color_manual(values = site_colors) +
+  scale_linetype_manual(values = site_linetypes) +
+  geom_vline(xintercept = -.25, colour = "grey") +
+  xlim(-1, 10) +
+  ylim(0, 120) +
+  xlab("Years since cohort entry") +
+  ylab("Median eGFR per patient per month") +
+  labs(caption = "Vertical grey line at 90 days prior to cohort entry")
+```
+
+Figure \@ref(fig:egfrdaysseptcts) depicts the distribution of days between serum creatinine and height measurement used to calculate eGFR. Most are on the same day or within the same week. Variation may be due to differences in availability of order date, specimen date and result date for the serum creatinine measurement across sites.
+
+
+```{r egfrdaysseptcts, fig.cap="Days between serum creatinine measurement and height measurement used to calculate eGFR"}
+egfr_days_sep_cts %>% 
+  ggplot(aes(x = forcats::fct_reorder(days_sep_cat, prop_meas), y = prop_meas, fill = site)) +
+  geom_col() +
+  preserve_dq2_plot() +
+  scale_fill_manual(values = site_colors) +
+  facet_wrap(~site) +
+  coord_flip() +
+  xlab("Days between serum creatinine and height measurement") +
+  ylab("Proportion measurements")
+```
+
+Figure \@ref(fig:egfrpermonth) depicts the mean number of eGFR measurements per patient post-CED per year, among patients with at least one measurement that year. Site B has low values and Site H has high values compared to other sites.
+
+```{r egfrpermonth, message=FALSE, echo=FALSE, warning=FALSE, fig.cap="Mean number of measurements per patient post-CED per year, among patients with at least one measurement that year"}
+egfr_bounded %>%
+  filter(comb_lab_date >= ce_date) %>%
+  mutate(year = year(comb_lab_date),
+         month = as.Date(paste0(
+           year(comb_lab_date), "-", month(comb_lab_date), "-01"
+         ))) %>%
+  group_by(site, year, patid) %>%
+  summarize(n_meas = n_distinct(comb_lab_date)) %>%
+  ungroup() %>%
+  group_by(site, year) %>%
+  mutate(mean_n_egfr = mean(n_meas)) %>%
+  ungroup() %>%
+  collect_new() %>% add_site_labels() %>%
+  inner_join(results_tbl('med_ah_rx_first') %>% collect() %>% add_site_labels(),
+             by = c('patid', 'site')) %>% 
+  ggplot(aes(
+    x = year,
+    y = mean_n_egfr,
+    color = site,
+    linetype = site
+  )) +
+  geom_line() +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors) +
+  xlab("Year") +
+  ylab("Mean number of eGFR measurements per patient")
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE, fig.cap="Mean number of measurements per patient post-CED", include = FALSE}
+attrition_cohort_counts <- attrition_cohort %>%
+  mutate(month = as.Date(paste0(
+    year(ce_date), "-", month(ce_date), "-01"
+  ))) %>%
+  group_by(site, month) %>% 
+  summarize(n_patids = n_distinct(patid)) %>% 
+  ungroup() %>%
+  group_by(site) %>% 
+  window_order(month) %>% 
+  mutate(n_patid_cumulative = cumsum(n_patids)) %>% 
+  arrange(site, month) %>% 
+  collect_new() %>% add_site_labels()
+
+egfr_bounded %>%
+  filter(comb_lab_date >= ce_date) %>%
+  mutate(month = as.Date(paste0(
+    year(comb_lab_date), "-", month(comb_lab_date), "-01"
+  ))) %>%
+  group_by(site, month) %>%
+  summarize(n_meas = n_distinct(comb_lab_date)) %>%
+  ungroup() %>% 
+  collect_new() %>% add_site_labels() %>% 
+  inner_join(attrition_cohort_counts, by = c("site", "month")) %>% 
+  mutate(mean_n_egfr = n_meas / n_patid_cumulative) %>%
+  ungroup() %>%
+  ggplot(aes(
+    x = month,
+    y = mean_n_egfr,
+    color = site,
+    linetype = site
+  )) +
+  geom_line() +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors) +
+  scale_y_log10()
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE, include=FALSE}
+low_by_site %>% select(-starts_with('site_')) %>%
+  select(threshold, site, med, percentile_25, percentile_75) %>% 
+  prettify_kable(table_caption = "For patients meeting inclusion criteria who have at least 1 low eGFR value, proportion of low values over total values, following the first low eGFR")
+```
+
+Figure \@ref(fig:egfreverlow) plots the proportion of the attrition cohort with at least one eGFRs below a low threshold across low thresholds, whereas Figure \@ref(fig:egfrthresplots2) plots the median proportion of eGFRs below a low threshold across low thresholds. Figure \@ref(fig:egfrthresplots1) plots the fraction of values below 30 over total values, following the first low eGFR for patients in the cohort who have at least eGFR value below 30. In general, there is alignment across sites. Site B appears to be an outlier across these eGFR distribution figures, but this may be due to small total cohort size. In figure \@ref(fig:egfrthresplots1), sites I and B have a larger interquartile range than other sites for the fraction of values below 30 over total values, following the first low eGFR for patients in the cohort who have at least eGFR value below 30.
+
+
+```{r egfreverlow, fig.cap="Proportion cohort with >=1 low eGFR"}
+testing_egfr_thresh <- egfr_bounded %>%
+  get_pct_cohort_below_thresh() %>%
+  reduce(.f = dplyr::union) %>% 
+  add_site_labels() %>% 
+  inner_join(attrition_cohort_by_site, by = "site") %>% 
+  mutate(prop_cohort = n_patids_low / total_patids)
+
+testing_egfr_thresh %>%
+  ggplot(aes(
+    x = threshold,
+    y = prop_cohort,
+    color = site,
+    linetype = site
+  )) +
+  geom_line() +
+  labs(x = 'Threshold for low eGFR',
+       y = 'Proportion cohort with 1 or more low measurement') +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors)
+```
+
+```{r egfrthresplots2, fig.cap="Median proportion of eGFRs that are low for patients with 1 or more low value"}
+ggplot(low_by_site,
+       aes(
+         x = threshold,
+         y = med,
+         color = site,
+         linetype = site
+       )) +
+  geom_line() +
+  labs(x = 'Threshold for low eGFR',
+       y = 'Median fraction low') +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_linetype_manual(values = site_linetypes) +
+  scale_color_manual(values = site_colors)
+```
+
+```{r egfrthresplots1, fig.cap="Median and 25-75%ile of eGFRs below 30 for patients with 1 or more eGFR value below 30"}
+thresh_plot <- function(tval) {
+  p <- low_by_site %>% filter(threshold == local(tval)) %>% 
+    ggplot(aes(x = site, color = site)) +
+    geom_point(aes(y = med), shape = 5) +
+    geom_errorbar(aes(ymin = percentile_25, ymax = percentile_75)) +
+    labs(subtitle = '',
+         y = 'Fraction low eGFR',
+         caption = paste0('eGFR thresold = ', tval)) +
+    preserve_dq2_plot() +
+    scale_linetype_manual(values = site_linetypes) +
+    scale_color_manual(values = site_colors) +
+    coord_flip()
+  print(p)
+}
+# walk(list(30L, 60L, 90L), thresh_plot)
+thresh_plot(30)
+```
+
+## Urine protein measurements
+
+Figure \@ref(fig:urinelabsbxp1) depicts the number of urine protein labs per patient before and after CED. Site H, M, and N have anomalously low numbers.
+
+```{r urinelabsbxp1, fig.cap = "Number of labs per patient before and after CED"}
+
+visits_urine_protein_tbl$event_date <- factor(visits_urine_protein_tbl$event_date, levels=c('ce_prior','ce_on_after'))
+
+ggplot(visits_urine_protein_tbl %>% filter(!is.na(event_date)), aes(x=site, y = total_labs,fill=event_date)) +
+ geom_boxplot(outlier.alpha = 0.1) +
+  theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1)) +
+  scale_y_log10() +
+  preserve_dq2_plot(legend = TRUE) +
+  ylab("Total number of labs") +
+  xlab("Site") +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  theme(axis.text.y = element_blank())
+  
+```
+
+Figure \@ref(fig:urineprotpropcohort) depicts the proportion of the attrition cohort with at least one urine protein measurement across sites. Aligning with the observation above, at sites L, M, and N an anomalously low proportion of the cohort has at least one urine protein measurement. Sites C and D have very limited or no quantitative urine protein measurements. This may be due to mismappings between qualitative and quantitative urine protein measurements.
+
+```{r urineprotpropcohort, fig.cap = "Proportion cohort with at least one urine protein measurement"}
+urine_protein_summary %>%
+  inner_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(prop_cohort = n_pats / total_patids) %>%
+  ggplot(aes(x = site, y = prop_cohort, fill = lab_type, label = round(prop_cohort, 2))) +
+  geom_col(position = "dodge") +
+  preserve_dq2_plot(legend = TRUE) +
+  coord_flip() +
+  scale_fill_discrete(
+    labels = c(
+      "quant" = "Quantitative LOINC code",
+      "qual" = "Qualitative LOINC code",
+                  "any" = "Qualitative or Quantitative LOINC code"
+    ),
+    name = "Urine protein LOINC code",
+    type = c("skyblue", "orange", "grey")
+  ) +
+  facet_wrap( ~ lab_type,
+              labeller = as_labeller(
+                c(
+                  "quant" = "Quantitative LOINC code",
+                  "qual" = "Qualitative LOINC code",
+                  "any" = "Qualitative or Quantitative LOINC code"
+                )
+              )) +
+  xlab("Site") +
+  ylab("Proportion cohort") +
+  geom_label(fill = "white")
+```
+
+Figure \@ref(fig:urineprotmeasperpat) depicts the number of urine protein measurements per patient across sites. Sites L and I have an anomalously large number of total urine protein labs per patient, compared to other sites. Site O has an anomalously low number of total urine protein labs per patient, compared to other sites.
+
+```{r urineprotmeasperpat, fig.cap = "Urine protein measurements per patient"}
+urine_protein_summary %>%
+  inner_join(attrition_cohort_by_site, by = "site") %>% 
+  mutate(meas_per_pat = n_meas/n_pats) %>% 
+  ggplot(aes(x = site, y = meas_per_pat, fill = lab_type, label = round(meas_per_pat, 1))) +
+  geom_col(position = "dodge") +
+  preserve_dq2_plot(legend = TRUE) +
+  coord_flip() +
+  scale_fill_discrete(
+    labels = c(
+      "quant" = "Quantitative LOINC code",
+      "qual" = "Qualitative LOINC code",
+                  "any" = "Qualitative or Quantitative LOINC code"
+    ),
+    name = "Urine protein LOINC code",
+    type = c("skyblue", "orange", "grey")
+  ) +
+  facet_wrap( ~ lab_type,
+              labeller = as_labeller(
+                c(
+                  "quant" = "Quantitative LOINC code",
+                  "qual" = "Qualitative LOINC code",
+                  "any" = "Qualitative or Quantitative LOINC code"
+                )
+              )) +
+  xlab("Site") +
+  ylab("Proportion cohort") +
+  geom_label(fill = "white")
+```
+
+### Qualitative urine protein measurements
+
+Figure \@ref(fig:upqualplot1) depicts the distribution of qualitative urine protein results. Interpretable results appear to be unavailable at some sites. \@ref(tab:upinvalidquant) summarizes the number of apparent quantitative urine protein results mapped to a qualitative urine protein lab code.
+
+```{r upqualplot1, fig.height=10, message=FALSE, echo=FALSE, warning=FALSE, fig.cap = "Distribution of qualitative urine protein results"}
+up_qual %>%
+  mutate(
+    result_parsed_simple = if_else(
+      result_qual %in% c("OT", "NI", "NA") &
+        (result_num == 100 |
+        result_num == 30 |
+        result_num == 300 |
+        result_num == 500 |
+        result_num == 1 |
+        result_num == 2 |
+        result_num == 3),
+      as.character(result_num),
+      result_qual
+    )
+  ) %>%
+  group_by(site, result_parsed_simple) %>% 
+  summarize(n_meas = sum(measurements)) %>% 
+  ungroup() %>% 
+  inner_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(meas_per_pat = n_meas/total_patids) %>% 
+  ggplot(aes(x = result_parsed_simple, y = meas_per_pat, fill = site)) +
+  geom_bar(stat = "identity", position = 'dodge') +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    vjust = 0.5,
+    hjust = 0.5
+  )) +
+  preserve_dq2_plot() +
+  scale_fill_manual(values = site_colors) +
+  coord_flip() +
+  facet_wrap(~ site, scales = "free_y") +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  xlab("Result") +
+  ylab("Measurements per patient")
+```
+
+```{r, upinvalidquant}
+up_qual %>% filter(
+  !(
+    is.na(result_num) |
+      result_num == 100 |
+      result_num == 30 |
+      result_num == 300 |
+      result_num == 500 |
+      result_num == 1 |
+      result_num == 2 |
+      result_num == 3
+  )
+) %>% group_by(site) %>% summarise(`N apparent quantitative results` = sum(measurements)) %>%
+  collect_new() %>% inner_join(urine_protein_summary %>% filter(lab_type == "qual"), by = "site") %>% 
+  mutate(`Proportion apparent quantitative results` = `N apparent quantitative results`/n_meas) %>%
+  rename(Site = site) %>% 
+  select(Site, `Proportion apparent quantitative results`) %>%
+  prettify_kable(
+    "Summary of number of apparent quantitative urine protein results mapped to a qualitative urine protein lab code"
+  )
+```
+
+### Quantitative urine protein measurements
+
+Table \@ref(tab:upinvalid) summarizes invalid quantitative urine protein results where the numeric result is missing or where the units are not mg/dL. Table \@ref(tab:upinvalidqual) summarizes the number of apparent qualitative urine protein results mapped to a quantitative urine protein lab code. Figure \@ref(fig:upquant) depicts the distribution of results for quantitative urine protein measurements.
+
+```{r upinvalid, message=FALSE, echo=FALSE, warning=FALSE}
+# summary of invalid
+up_quant %>%
+  group_by(site) %>%
+  summarise(
+    n_measurements = n_distinct(lab_result_cm_id),
+    n_invalid_results = sum(numerically_invalid),
+    n_na = sum(na_vals),
+    n_not_std_units = sum(unit_nonstd)
+  ) %>%
+  ungroup() %>%
+  collect() %>% 
+  inner_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(meas_per_pat = n_measurements/total_patids) %>% 
+  mutate(
+    percent_invalid_results = 100 * (n_invalid_results / n_measurements),
+    percent_na_results = 100 * (n_na / n_measurements),
+    percent_not_std_units = 100 * (n_not_std_units / n_measurements)
+  ) %>%
+  select(
+    Site = site,
+    `Percent NA` = percent_na_results,
+    `Percent unit not mg/dL` = percent_not_std_units,
+    `Total number of measurements` = n_measurements,
+    `Measurements per patient` = meas_per_pat
+  ) %>%
+  prettify_kable("Summary of invalid quantitative urine protein measurements")
+```
+
+```{r, upinvalidqual}
+up_quant %>% filter(
+  na_vals == 1 &
+    result_qual %in% c('POSITIVE', '2+', 'NEGATIVE', 'LARGE', 'NI', 'OT', '1+', '3+')
+) %>% group_by(site) %>% summarise(`N apparent qualitative results` = n()) %>%
+  collect_new() %>%
+    inner_join(urine_protein_summary %>% filter(lab_type == "quant"), by = "site") %>% 
+  mutate(`Proportion apparent qualitative results` = `N apparent qualitative results`/n_meas) %>%
+  rename(Site = site) %>% 
+  select(Site, `Proportion apparent qualitative results`) %>%
+  prettify_kable("Summary of number of apparent qualitative urine protein results mapped to a quantitative urine protein lab code")
+```
+
+```{r upquant, fig.cap="Distribution of results for quantitative urine protein measurements"}
+up_quant %>%
+  filter(!is.na(result_num),
+         unit_nonstd == 0 | (site == "D"),
+           result_num <= 2000) %>%
+  collect_new() %>%
+  ggplot(aes(x = result_num, fill = site)) +
+  geom_density() +
+  preserve_dq2_plot() +
+  facet_wrap( ~ site) +
+  scale_x_log10() +
+  scale_fill_manual(values = site_colors)
+```
+
+# Procedures
+
+## Chronic dialysis
+
+Based on a survey of sites, the PRESERVE CRO workgroup determines that the following `r px_chronic_dialysis %>% distinct_ct(id_col = "concept_code")` CPT4 codes should identify patients receiving chronic dialysis across sites: `r px_chronic_dialysis %>% select(concept_code) %>% arrange(concept_code) %>% pull()`.
+
+Figure \@ref(fig:dialysiscts) illustrates the counts and percentages of patients who have a chronic dialysis procedure code. Fewer patients than anticipated are being identified by these codes across sites and these codes are not present at all at I, J, B, and M. Figure \@ref(fig:dialysishm) depicts the frequency of code use across sites.
+
+```{r dialysiscts, fig.cap="Patients with chronic dialysis procedure code"}
+kidney_dialysis_any_px %>%
+  inner_join(px_chronic_dialysis,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  group_by(site) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>% 
+  full_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(n_patids = if_else(n_patids < 11, 10L, n_patids)) %>%
+  mutate(percent_cohort = 100*(n_patids/total_patids)) %>% 
+  ggplot(aes(x = site, y = percent_cohort, label = n_patids)) +
+  geom_col() +
+  geom_label() +
+  preserve_dq2_plot(legend = TRUE) +
+  labs(caption = "Counts <11 set to 10, Bar labels represent raw counts") +
+  ylab("Percent cohort") +
+  xlab("Site") +
+  coord_flip()
+```
+
+```{r dialysishm, fig.cap="Distribution of chronic dialysis procedure codes"}
+kidney_dialysis_any_px %>%
+  inner_join(px_chronic_dialysis,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  mutate(code_concept = px) %>%
+  group_by(site, code_concept) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>%
+  make_heatmap2()
+```
+
+## Kidney transplant
+
+Figure \@ref(fig:transplantcts) depicts percent cohort with a transplant procedure code across sites, whereas figure \@ref(fig:transplanthm) depicts the frequency of code use.
+
+```{r transplantcts, fig.cap="Patients with kidney transplant procedure code"}
+kidney_transplant_px %>%
+  inner_join(px_kidney_transplant,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  group_by(site) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>% 
+  full_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(n_patids = if_else(n_patids < 11, 10L, n_patids)) %>%
+  mutate(percent_cohort = 100*(n_patids/total_patids)) %>% 
+  ggplot(aes(x = site, y = percent_cohort, label = n_patids)) +
+  geom_col() +
+  geom_label() +
+  preserve_dq2_plot(legend = TRUE) +
+  labs(caption = "Counts <11 set to 10, Bar labels represent raw counts") +
+  ylab("Percent cohort") +
+  xlab("Site") +
+  coord_flip()
+```
+
+```{r transplanthm, fig.cap="Distribution of kidney transplant procedure codes"}
+kidney_transplant_px %>%
+  inner_join(px_kidney_transplant,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  mutate(code_concept = px) %>%
+  group_by(site, code_concept) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>%
+  make_heatmap2()
+```
+
+## Ambulatory Blood Pressure Monitoring (ABPM)
+
+The PRESERVE ABPM workgroup identified the following CPT4 codes which are used for patients who undergo ABPM: `r px_abpm %>% select(concept_code) %>% arrange(concept_code) %>% pull()`. Figure \@ref(fig:abpmcts) depicts the count and percentage cohort at each site with at least one ABPM code. Site H does not have any patients with these procedure codes.
+
+```{r abpmcts, fig.cap="Patients with ABPM procedure code"}
+abpm_any_px %>%
+  inner_join(px_abpm,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  group_by(site) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>% 
+  full_join(attrition_cohort_by_site, by = "site") %>%
+  mutate(n_patids = if_else(n_patids < 11, 10L, n_patids)) %>%
+  mutate(percent_cohort = 100*(n_patids/total_patids)) %>% 
+  ggplot(aes(x = site, y = percent_cohort, label = n_patids)) +
+  geom_col() +
+  geom_label() +
+  preserve_dq2_plot(legend = TRUE) +
+  labs(caption = "Counts <11 set to 10, Bar labels represent raw counts") +
+  ylab("Percent cohort") +
+  xlab("Site") +
+  coord_flip()
+```
+
+```{r, fig.cap="Distribution of ABPM procedure codes"}
+abpm_any_px %>%
+  inner_join(px_abpm,
+             by = c("px" = "concept_code",
+                    "px_type" = "pcornet_vocabulary_id")) %>%
+  mutate(code_concept = px) %>%
+  group_by(site, code_concept) %>%
+  summarize(n_patids = n_distinct(patid)) %>%
+  ungroup() %>%
+  make_heatmap2()
+```
+
+# Adverse events
+
+Figure \@ref(fig:aeconditions1) shows the proportion of the cohort recorded as experiencing adverse events, whereas figure \@ref(fig:aeconditions2) shows a heatmap of the distribution of adverse events recorded in patients at each site. There is variation across sites but no clear outliers.
+
+```{r aeconditions1, fig.cap = "Proportion of eligible patients who experience adverse event"}
+ae_conditions_tbl %>%
+  mutate(pts_dx = if_else(pts_dx > 0 &
+                            pts_dx < 11, 10, pts_dx)) %>% mutate(prop = pts_dx / pts_all) %>%
+  ggplot(aes(x = site, y = prop, fill = category, label = pts_dx)) +
+  geom_bar(stat = 'identity') +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  ))  +
+  preserve_dq2_plot(legend = TRUE) +
+  coord_flip() +
+  facet_wrap(~ category) +
+  xlab("Site") +
+  ylab("Proportion cohort") +
+  labs(caption = "Counts <11 set to 10")
+```
+
+```{r aeconditions2, fig.cap = "Heatmap of distribution of adverse events"}
+ggplot(ae_conditions_tbl, aes(x=site, y = category,fill=prop)) +
+  geom_tile() +
+  scale_fill_gradient(low='white', high = 'dark blue') +
+  theme(axis.text.x=element_text(angle=90,vjust=0.5,hjust=1)) 
+
+```
+
+# Blood pressure measurements
+
+Figure \@ref(fig:bpavail2) depicts the frequency with which vital records contain both systolic blood pressure (SBP) and diastolic blood pressure (DBP) measurements in the same row of the VITALS table. Site I appears to record SBP and DBP measurements in separate rows. At Site M and Site N there are many rows which only include SBP information.
+
+```{r bpavail2, fig.cap="Frequency with which vital records contain both SBP and DBP measurements (in the same row)"}
+cohort_bp %>%
+  group_by(site, bp_completeness) %>% 
+  summarise(n=n())%>%
+  ungroup() %>%
+  group_by(site) %>%
+  mutate(prop=round(n/sum(n),4))%>%
+  ggplot(aes(x = site, y = prop, fill = bp_completeness)) +
+  geom_col() +
+  coord_flip() +
+  preserve_dq2_plot(legend = TRUE) +
+  scale_fill_discrete(
+    labels = c("both" = "SBP and DBP",
+               "diastolic_only" = "DBP only",
+               "systolic_only" = "SBP only"),
+    name = ""
+  ) +
+  ylab("Proportion vital records") +
+  xlab("Site")
+```
+
+Figure \@ref(fig:bpcorrscatter1) depicts the correlation of SBP and DBP measurements across sites. An anomalous low DBP distribution at Site H, L and M is highlighted in red. Furthermore, there are some high outliers at Site H and J. The correlation between SBP and DBP at Site H and Site M is low, compared to other sites.
+
+```{r bpcorrscatter1, fig.cap="Diastolic vs. Systolic Blood Pressure Measurements"}
+cohort_bp_sample %>%
+  mutate(outlier_flag = if_else((diastolic < 10 |
+                                   is.na(diastolic)) &
+                                  (systolic >= 10 |
+                                     is.na(systolic)),
+                                TRUE, FALSE)) %>%
+  ggplot(aes(x = systolic, y = diastolic)) +
+  geom_point(size = 0.1, aes(color = outlier_flag)) +
+  geom_smooth() +
+  geom_text(data = cohort_bp_corr,
+            mapping = aes(x = 50,
+                          y = 150,
+                          label = corr)) +
+  xlim(0, 250) +
+  ylim(0, 150) +
+  facet_wrap( ~ site) +
+  labs(caption = 'Plots generated using sample of 5,000 measurements per site')  +
+  preserve_dq2_plot() +
+  xlab("Systolic blood pressure measurements (mmHg)") +
+  ylab("Diastolic blood pressure measurements (mmHg)") +
+  scale_color_discrete(
+    type = c("grey", "red")
+  )
+  
+```
+
+Figures \@ref(fig:sbpvalsbox) and \@ref(fig:sbpvalsdensity) depict the distribution of systolic blood pressure measurements across sites. Sites J and K have some unexpected negative values.
+
+```{r sbpvalsbox, fig.cap="Distribution of Systolic Blood Pressures"}
+ggplot(cohort_bp_sample, aes(x=site, y = systolic))+
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0, 250))+
+  labs(caption = 'Plots generated using sample of 5,000 measurements per site') +
+           preserve_dq2_plot() +
+  coord_flip() +
+  xlab("Systolic blood pressure measurements (mmHg)") +
+  ylab("Site")
+```
+
+```{r sbpvalsdensity, fig.cap="Distribution of Systolic Blood Pressures", fig.width=5}
+ggplot(cohort_bp_sample, aes(
+  x = systolic,
+  y = site,
+  color = site,
+  linetype = site
+)) +
+  coord_cartesian(xlim = c(0, 250))+
+  labs(caption = 'Plots generated using sample of 5,000 measurements per site') +
+  preserve_dq2_plot() +
+  scale_color_manual(values = site_colors)  +
+  scale_linetype_manual(values = site_linetypes) + geom_density_ridges(fill = "white") +
+  xlab("Systolic blood pressure measurements (mmHg)") +
+  ylab("Site")
+```
+
+Figures \@ref(fig:dbpvalsbox) and \@ref(fig:dbpvalsdensity) depict the distribution of diastolic blood pressure measurements across sites. Sites M and H have an anomalous distributions with values around zero. Sites J and A have some unexpected negative values.
+
+
+```{r dbpvalsbox, fig.cap="Distribution of Diastolic Blood Pressures"}
+ggplot(cohort_bp_sample, aes(x=site, y = diastolic))+
+  geom_boxplot() +
+  coord_cartesian(xlim = c(0, 150))+
+  labs(caption = 'Plots generated using sample of 5,000 measurements per site') +
+           preserve_dq2_plot() +
+  coord_flip() +
+  ylab("Diastolic blood pressure measurements (mmHg)") +
+  xlab("Site")
+```
+
+```{r dbpvalsdensity, fig.cap="Distribution of Diastolic Blood Pressures", fig.width=5}
+ggplot(cohort_bp_sample, aes(
+  x = diastolic,
+ y = site,
+  color = site,
+  linetype = site
+)) +
+  coord_cartesian(xlim = c(0, 150))+
+  labs(caption = 'Plots generated using sample of 5,000 measurements per site') +
+  preserve_dq2_plot() +
+  scale_color_manual(values = site_colors)  +
+  scale_linetype_manual(values = site_linetypes) + geom_density_ridges(fill = "white") +
+  xlab("Diastolic blood pressure measurements (mmHg)") +
+  ylab("Site")
+```
+
+Table [C](#tab:bpmedvalstabletab) shows the distribution of SBP and DBP measurements 6 months before and first anti-hypertensive medication, only for patients with at least one anti-hypertensive medication exposure, where **before** are blood pressure measurements before starting an anti-hypertensive medication and **on_after** are blood pressure measurements on or after starting an anti-hypertensive medication. At site M , we do not observe a change in SBP and DBP measurements. Site H is missing most DBP measurements, aligning with the observation made about rows with SBP only for figure \@ref(fig:bpavail2).
+
+```{r bpmedvalstable, fig.width=20}
+cohort_near_med <- cohort_bp_sample2 %>%
+  inner_join(get_results('med_ah_rx_first') %>%
+               select(-site_color, -site_linetype),
+             by = c('patid', 'site')) %>%
+  filter(!is.na(min_date))%>%
+  mutate(time_to_med = as.numeric(measure_date-min_date), # if bp date is after first bp med date, this will be positive
+         time_to_med_abs = abs(time_to_med),
+         med_timing = case_when(time_to_med<0~ 'before',
+                                time_to_med>=0 ~ 'on_after',
+                                TRUE ~ "NA"))%>%
+  filter(time_to_med_abs <= 30*6)
+
+table1(~systolic+diastolic|site*med_timing, 
+       data=cohort_near_med,
+       render.categorical=my.render.cat, render.continuous=my.render.cont,
+       caption = "<p id='tab:bpmedvalstabletab'> Table C: Distribution of BP In Relation to Medication Exposure
+       (using sample of 50,000 measurements per site)") %>% 
+  knitr::asis_output()
+```
+
+```{r bpdxvalstable, fig.width=20, include = FALSE}
+bp_htn_dx <- cohort_bp_sample2 %>% 
+  left_join(cohort_htn_dx, by = c('patid'), copy=TRUE) %>% 
+  mutate(htn_dx = if_else(is.na(htn_dx), "no_htn_dx", htn_dx))
+  
+table1(~systolic+diastolic|site*htn_dx, 
+       data=bp_htn_dx,
+       render.categorical=my.render.cat, render.continuous=my.render.cont,
+       caption = "<p id='tab:bpdxvalstabletab'> Table D: Distribution of BP In Relation to Hypertension diagnosis
+       (using sample of 50,000 measurements per site)") %>% 
+  knitr::asis_output()
+```
+
+Figure \@ref(fig:bpbxp1) shows the distribution of the number of blood pressure measurements per patient before and after CED.
+
+```{r bpbxp1, fig.cap = "Number of blood pressure measurements per patient before and after CED (log scale)"}
+
+visits_bp_tbl$event_date <- factor(visits_bp_tbl$event_date, levels=c('ce_prior','ce_on_after'))
+
+ggplot(visits_bp_tbl, aes(x = site, y = total_bp, fill = event_date)) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1
+  )) +
+  scale_y_log10() +
+  preserve_dq2_plot(legend = TRUE) +
+  ylab("Number of blood pressure measurements per patient") +
+  scale_fill_discrete(
+    labels = c("ce_prior" = "Prior to CED",
+               "ce_on_after" = "On or after CED"),
+    name = "Timing"
+  ) +
+  theme(axis.text.y = element_blank())
+  
+```
+
+# Geographic variables
+
+Figure \@ref(fig:addressnumpatplot) depicts the proportion of patients with at least one 5-digit ZIP code, 9-digit ZIP code, census block group , or census tract variable available. Geographic information is unavailable for Sites D and H. Site L has a high degree of missingness compared to other sites, but this may be due to a study period restriction which was erroneously applied to dates associated with address history in the row level query. Sites C, D, J, K, L, M, H, O, and J do not appear have substantial geographic information more granular than 5-digit ZIP code or census tract.
+
+```{r addressnumpatplot, fig.cap="Proportion of patients per site with at least one geographic variable"}
+zip5 <- address_history_site %>%
+  select(site, prop_numpat = prop_numpat_zip5) %>%
+  mutate(variable = "zip5")
+zip9 <- address_history_site %>%
+  select(site, prop_numpat = prop_numpat_zip9) %>%
+  mutate(variable = "zip9")
+cbg <- address_history_site %>%
+  select(site, prop_numpat = prop_numpat_cbg) %>%
+  mutate(variable = "cbg")
+ct <- address_history_site %>%
+  select(site, prop_numpat = prop_numpat_ct) %>%
+  mutate(variable = "ct")
+
+zip5 %>%
+  union(zip9) %>%
+  union(cbg) %>%
+  union(ct) %>%
+  ggplot(aes(x = variable, y = prop_numpat, fill = variable)) +
+  geom_bar(stat = 'identity', position = "dodge") +
+  geom_label(aes(label = prop_numpat), fill = "white") +
+  coord_flip() +
+  facet_wrap( ~ site) +
+  preserve_dq2_plot(legend = TRUE) +
+  ylab("Proportion cohort") +
+  xlab("Variable") +
+  ylim(0, 1) +
+  scale_fill_discrete(
+    labels = c("cbg" = "Census block group",
+               "ct" = "Census tract",
+               "zip5" = "5 digit ZIP code",
+               "zip9" = "9 digit ZIP code"),
+    name = ""
+  )
+```
+
+Figure \@ref(fig:multipleaddressnumpatplot) shows the proportion of patients with multiple zip codes or census block group records available. These values are lowered due to a study period restriction which was erroneously applied to dates associated with address history in the row level query. Nevertheless, further investigation is required to determine whether address history information is available at sites D, M, H, and K.
+
+```{r multipleaddressnumpatplot, fig.cap="Proportion of patients per site with multiple geographic variables"}
+zip5_mult <- address_history_site %>%
+  select(site, prop_numpat_mult = prop_numpat_multzip5) %>%
+  mutate(variable = "zip5")
+zip9_mult  <- address_history_site %>%
+  select(site, prop_numpat_mult = prop_numpat_multzip9) %>%
+  mutate(variable = "zip9")
+cbg_mult  <- address_history_site %>%
+  select(site, prop_numpat_mult = prop_numpat_multcbg) %>%
+  mutate(variable = "cbg")
+ct_mult  <- address_history_site %>%
+  select(site, prop_numpat_mult = prop_numpat_multct) %>%
+  mutate(variable = "ct")
+
+zip5_mult  %>%
+  union(zip9_mult) %>%
+  union(cbg_mult) %>%
+  union(ct_mult) %>%
+  ggplot(aes(x = variable, y = prop_numpat_mult, fill = variable)) +
+  geom_bar(stat = 'identity', position = "dodge") +
+  geom_label(aes(label = prop_numpat_mult), fill = "white") +
+  coord_flip() +
+  facet_wrap(~ site) +
+  preserve_dq2_plot(legend = TRUE) +
+  ylab("Proportion cohort") +
+  xlab("Variable") +
+  ylim(0, 1) +
+  labs(caption = "Values are lowered due to a study period restriction which was erroneously applied to dates associated with address history in the row level query") +
+  scale_fill_discrete(
+    labels = c("cbg" = "Census block group",
+               "ct" = "Census tract",
+               "zip5" = "5 digit ZIP code",
+               "zip9" = "9 digit ZIP code"),
+    name = ""
+  )
+```

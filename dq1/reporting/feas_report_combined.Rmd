@@ -1,0 +1,1859 @@
+---
+title: "PRESERVE Data Quality Report 1"
+author: "PRESERVE Coordinating Center"
+date: "`r format(Sys.time(), '%m/%d/%y')`"
+output:
+  bookdown::html_document2:
+    number_sections: TRUE
+    fig_caption: TRUE
+    toc: TRUE
+    toc_float:
+      collapsed: false
+params:
+  mask_sites: FALSE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6, fig.align = "center")
+
+# Default taken from R notebook behavior: when knitting, wd will always be location of notebook
+base_dir <- '..'
+Sys.setenv(PEDSNET_SKIP_REQUEST_EXECUTION=1)
+try(source('../site/run.R')) # May not be able to make db connection
+
+# Set to "local" to read data from ../results, or another value to read from db
+data_source <- if_else(config('execution_mode') == 'distribution', 'local', 'not_local')
+
+require(tidyr)
+require(knitr)
+require(kableExtra)
+require(stringr)
+require(tibble)
+require(ggplot2)
+library(purrr)
+library(VennDiagram)
+require(RColorBrewer)
+source("../code/cohort_report.R")
+source("../code/cohort_dc_report.R")
+```
+
+```{r configs_etc}
+site_report_config <-
+  read_csv("../specs/site_report_config.csv", col_types = "cccc")
+
+site_colours <-
+  site_report_config %>%
+  add_site_labels() %>%
+  select(site_name, site_colour) %>%
+  tibble::deframe()
+
+site_linetypes <-
+  site_report_config %>%
+  add_site_labels() %>%
+  select(site_name, site_linetype) %>%
+  tibble::deframe()
+
+sites <- site_report_config %>%
+  mutate(masked_site = site_mask) %>%
+  add_site_labels() %>%
+  select(site_name, masked_site) %>%
+  mutate(site_name = toupper(site_name)) %>% 
+  pivot_wider(names_from = masked_site,
+              values_from = site_name)
+```
+
+```{r get_data}
+# Attrition
+attrition <- get_results("attrition")
+
+# Quick fix for suppressing small cell sizes
+attrition_step0 <- attrition %>% 
+  filter(step_num == 0) %>% 
+  rename(step0 = counts) %>% 
+  select(site_name, step0)
+
+attrition_step3 <- attrition %>% 
+  filter(step_num == 3) %>% 
+  rename(step3 = counts) %>% 
+  select(site_name, step3)
+
+attrition <- attrition %>%
+  left_join(attrition_step0, by = "site_name") %>% 
+  left_join(attrition_step3, by = "site_name") %>%
+  group_by(site_name) %>% 
+  mutate(
+    counts = if_else(counts < 11 & counts > 0, 10, counts),
+    percent_prior_step = 100 * counts / lag(counts),
+    percent_step0 = 100 * counts / step0,
+    percent_step3 = 100 * counts / step3
+  ) %>% 
+  ungroup()
+
+# Codeset counts across domains
+codeset_cts <- get_results("codeset_cts")
+
+# Demographics / Table 1 type info
+dem_birth_yr <- get_results("dem_birth_yr")
+dem_cats <- get_results("dem_cats")
+dem_ce_age <- get_results("dem_ce_age")
+dem_ce_yr <- get_results("dem_ce_yr")
+enc_ced_fu <- get_results("enc_ced_fu")
+enc_ip_fu <- get_results("enc_ip_fu")
+
+# Visits
+enc_type_cts <- get_results("enc_type_cts")
+prov_neph <- get_results("prov_neph")
+unmap_neph <- get_results("unmap_neph") # To be addressed in site-specific work
+
+# Diagnoses
+cond_dx_cts <- get_results("cond_dx_cts")
+diag_dx_cts <- get_results("diag_dx_cts")
+
+# Medications
+disp_rx_cts <- get_results("disp_rx_cts")
+med_rx_cts <- get_results("med_rx_cts")
+pres_rx_cts <- get_results("pres_rx_cts")
+
+# Labs
+lab_loinc_cts <- get_results("lab_loinc_cts")
+lab_vals1 <- get_results("lab_vals1")
+lab_vals2 <- get_results("lab_vals2")
+lab_vals3 <- get_results("lab_vals3")
+lab_vals4 <- get_results("lab_vals4")
+lab_vals5 <- get_results("lab_vals5")
+lab_vals6 <- get_results("lab_vals6")
+lab_vals7 <- get_results("lab_vals7")
+lab_vals8 <- get_results("lab_vals8")
+unmap_prot <- get_results("unmap_prot") # To be addressed in site-specific work
+unmap_scr1 <- get_results("unmap_scr1") # To be addressed in site-specific work
+unmap_scr2 <- get_results("unmap_scr2") # To be addressed in site-specific work
+
+# Procedures
+proc_px_cts <- get_results("proc_px_cts")
+
+# Measurements
+vital_dia_bp_vals <- get_results("vital_dia_bp_vals")
+vital_dia_bp_cts <- get_results("vital_dia_bp_cts")
+vital_ht_cts <- get_results("vital_ht_cts")
+vital_ht_vals <- get_results("vital_ht_vals")
+vital_sys_bp_cts <- get_results("vital_sys_bp_cts")
+vital_sys_bp_vals <- get_results("vital_sys_bp_vals")
+vital_wt_cts <- get_results("vital_wt_cts")
+vital_wt_vals <- get_results("vital_wt_vals")
+```
+
+**Please treat the contents of this report as confidential and do not redistribute beyond PRESERVE staff at your organization.**
+
+# Introduction
+
+This report summarizes results of the PRESERVE feasibility query which was distributed to and executed by participating sites in November 2021. The query was executed against PCORnet 6.0 Cycle 10, Refresh 2. The focus is characterization of a computational phenotype of mild-to-moderate chronic kidney disease (CKD) and a limited set of important variables for the PRESERVE study. The goals of the report are to identify potential data quality issues and areas for remediation. The feasibility query is not exhaustive and it is expected that refinements will be made to analyses and codesets. As such, observations in this report may incompletely predict observations made during the study. More detailed data quality characterization will be completed once the PRESERVE Coordinating Center (CC) receives each site's row-level data submission.
+
+The report is divided into 3 sections:
+
+1.  [Key takeaways] from the feasibility report, highlighting some of the most critical issues.
+
+2.  [Cohort characterization], providing cohort definitions, distributions across sites, as well as limited demographic and clinical characteristics for 3 CKD cohort definitions.
+
+3.  [Data element examination], analyzing distributions across sites for a limited set of important variables, with a view to identifying potential data quality issues for further analysis. Distributions are examined for the union of 3 CKD cohort definitions to maximize cohort size at each site for identification of data quality issues. A summary of a limited set of data curation checks, which were applied to each site's entire datamart, is also provided.
+
+*Please note that throughout the report, cohort counts greater than zero but fewer than 11 patients are suppressed with counts of 10 to limit risks to patient privacy.*
+
+# Key takeaways
+
+The table below highlights some of the most critical issues identified by the feasibility query.
+
+|                                               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+|-----------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [Attrition cohort]                                   | Most sites follow the same general pattern of attrition for implementation of a computational phenotype (Section \@ref(computational-phenotype-for-mild-to-moderate-ckd)) for mild-to-moderate CKD. Sites `r sites$B`, `r sites$C`, `r sites$F`, `r sites$H`, and `r sites$P` have anomalous patterns of attrition compared with other sites (e.g. Figure \@ref(fig:attrplotstep0log)). Step 8, the application of a nephrology provider visit requirement, dramatically reduced cohort size at sites `r sites$B`, `r sites$F` and `r sites$P`. This is likely due to a data quality issue, which is explored further in Section \@ref(nephrology-specialty). Site `r sites$C` loses approximately 99% of its cohort when a height requirement is applied at Step 4, which may be due to missingness summarized in Section \@ref(height). For Site `r sites$H`, over 80% of patients with calculable eGFRs have at least one eGFR within the mild-to-moderate CKD range (Step 5), which is likely attributable to an anomalously low height distribution explored in Section \@ref(height). |
+| [Nephrology specialty](#nephrology-specialty) | There is wide variation across sites for the percentage patients with eGFRs in the mild-to-moderate CKD range who have one or more in-person visit with a nephrology provider (e.g. Figure \@ref(fig:attrstep8)). Sites `r sites$I` and `r sites$O` have higher percentages, at around 50%. For sites `r sites$B`, `r sites$F`, and `r sites$P`, none, or a very limited number of patients meet this criterion. The remainder of sites fall between 15% and 35%. Preliminary exploration of the RAW_PROVIDER_SPECIALTY indicates that there may be some unmapped or mis-mapped nephrology providers at some sites (Table \@ref(tab:unmapneph)). Further data quality analyses may explore these issues further and investigate alternative approaches to identifying nephrology visits.                                                                                                                                                                                                                                                                                                     |
+| Labs: [Serum creatinine]                            | As summarized in Section \@ref(serum-creatinine), missingness is low for serum creatinine and approximately 75% patients in the mild-to-moderate CKD cohorts have serum creatinine measurements (Figure \@ref(fig:serumcreatininepercents)). Sites `r sites$A` and `r sites$O` have anomalously high mean values for serum creatinine, but their medians align with other sites, potentially due to data quality issues such as large numbers (e.g. 99999) representing null values (Figure \@ref(fig:serumcreatininevals)). Site `r sites$J` has an anomalously large cohort of patients meeting the high serum creatinine cohort definition (\@ref(tab:cohortdef)) and Site `r sites$H` does not have any patients meeting this definition. These issues for the high serum creatinine cohort may be due to data quality issues specific to upper limit of normal information, discussed in Section \@ref(high-serum-creatinine-cohort).                                                                                                                                                   |
+| Labs: [Serum cystatin]                              | There is missingness at many sites for serum cystatin (e.g. Table \@ref(tab:serumcystatinmissing)). At sites with available serum cystatin measurements, there is wide variation in the percentage patients with these measurements (Figure \@ref(fig:serumcystatinpercents)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| [Medications]                                 | The following categories of medication were explored for the feasibility query: ACE inhibitors, Angiotensin receptor blockers, Beta blockers, Calcium channel blockers, Loop diuretics, and Thiazides. Across sites, ACE inhibitors and Calcium channel blockers are most frequent for prescription records (Figures \@ref(fig:allrxheatmappres) and \@ref(fig:allrxpercentspres)), whereas Loop diuretics and Calcium channel blockers are most frequent for medication administration records (Figures \@ref(fig:allrxheatmapadmin) and \@ref(fig:allrxpercentsadmin)). Sites `r sites$C` and `r sites$B` do not fit the general pattern for prescription records. Sites `r sites$K` and `r sites$F` do not fit the general pattern for medication administrations. Further data quality analyses can investigate the source of these anomalies.                                                                                                                                                                                                                                                                                                                                                                                          |
+| [Blood pressures]                             | For both diastolic and systolic blood pressure measurements, Sites `r sites$C` and `r sites$F` have higher mean values than most other sites (Figures \@ref(fig:diabpvals2) and \@ref(fig:sysbpvals2)) and Site `r sites$H` has an anomalously large number of measurements per patient (Figures \@ref(fig:diabpcts) and \@ref(fig:sysbpcts)). For diastolic blood pressure measurements only, Site `r sites$O` does not have any measurements (Table \@ref(tab:diabpmissing)) and Sites `r sites$E` and `r sites$M` have some very low measurements, although their overall means pattern with other sites (Figure \@ref(fig:diabpvals2)). For systolic blood pressure only, Site `r sites$P` has some very low measurements, but its overall mean patterns with other sites (Figures \@ref(fig:sysbpvals2)).                                                                                                                                                                                                                                                                              |
+| [Heights and weights]                         | Site `r sites$H` has anomalously large number of height and weight measurements per patient per calendar year (Figures \@ref(fig:heightcts) and \@ref(fig:weightcts)).  Site `r sites$H` also has anomalously low height measurement values (Figure \@ref(fig:heightvals)). Site `r sites$P` has an anomalously large number of weight measurements per patient per calendar year (Figure \@ref(fig:weightcts)).  Site `r sites$C` has unexpected missingness for height across the study period (Table \@ref(tab:heightmissing)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [Data curation check summary]                         | A limited set of PCORnet Data Curation checks, which were determined to be important for the PRESERVE study, were evaluated against sites' entire datamarts. The following sites had exceptions for at least one check: Sites `r sites$J`, `r sites$M`, `r sites$K`,  `r sites$C`, `r sites$F`, `r sites$G`, and `r sites$O` (Table \@ref(tab:dccheckexceptions)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+: Key takeaways
+
+# Cohort characterization
+
+This report includes 3 mild-to-moderate CKD cohort definitions, provided in Table \@ref(tab:cohortdef) below. The estimated glomerular filtration rate (eGFR) -based attrition cohort is the primary focus, but for sites with data quality issues affecting the attrition cohort definition, the high serum creatinine and CKD Stage 2/3 diagnosis cohorts are informative about distributions of important variables.
+
+```{r cohortdef}
+cohort_definitions <- tibble(
+  `Cohort name` = c(
+    "Attrition cohort",
+    "High serum creatinine cohort",
+    "CKD Stage 2/3 diagnosis cohort"
+  ),
+  `Definition` = c(
+    "Patients who meet criteria for a computational phenotype for mild-to-moderate chronic kidney disease, described below",
+    "Patients with >=2 serum creatinine measurements which are >= 1.5 * the provided upper limit of normal, separated by >=90 days, aged >=1 and <18 years",
+    "Patients with >= 1 chronic kidney disease stage 2 or 3 diagnosis (from the PCORnet diagnosis table), aged >=1 and <18 years"
+  ),
+  `Notes` = c(
+    "Primary focus. \nThe cohort entry date is defined as the date of the first eGFR of the earliest pair of eGFRs >=30 & <=89 mL/min/1.73m2 aged >=1 and < 18, separated by >=90 days, without an intervening eGFR >=90.",
+    "The high serum creatinine cohort approximates patients with eGFRs <=89 mL/min/1.73m2. The upper limit of normal is provided for each serum creatinine lab. \nThe cohort entry date is defined as the earliest serum creatinine measurements which is >= 1.5 * the upper limit of normal.",
+    "The cohort entry date is defined as the earliest CKD Stage 2/3 diagnosis."
+  )
+)
+
+cohort_definitions %>%
+  prettify_kable(table_caption = "Mild-to-moderate CKD cohort definitions")
+```
+
+Furthermore, lack of overlap between definitions may be informative about data quality issues in some instances (see Section \@ref(cohort-overlap)).
+
+## Computational phenotype for mild-to-moderate CKD
+
+0.  Patients with \>=1 visit between January 2009 and December 2021
+
+1.  Patients with \>=1 in-person visit between January 2009 and December 2021
+
+2.  Patients with \>=1 serum creatinine measurement
+
+3.  Patients aged \>=1 and \< 18 at time of \>=1 serum creatinine measurement
+
+4.  Patients with height measurement available \<=180 days of serum creatinine value (aged \>=1 and \< 18)
+
+5.  Patients with \>=1 estimated glomerular filtration rate (eGFR) value \>=30 and \<=89 mL/min/1.73m2 (aged \>=1 and \< 18)
+
+6.  Patients with \>=2 eGFRs \>=30 and \<=89 mL/min/1.73m2 which are \>=90 days apart (aged \>=1 and \< 18)
+
+7.  Patients with \>=2 eGFRs \>=30 and \<=89 mL/min/1.73m2 which are \>=90 days apart, without an intervening eGFR value \>= 90 mL/min/1.73m2 (aged \>=1 and \< 18)
+
+8.  Exclude patients with no in-person visits with a nephrology provider at any time between January 2009 and December 2021
+
+9.  Exclude patients with \>=1 chronic dialysis procedure on or before cohort entry date
+
+10. Exclude patients with \>=1 kidney transplant procedure on or before cohort entry date
+
+Notes:
+
+-   The cohort entry date (CED) is defined as the date of the first eGFR of the earliest pair of eGFRs \>=30 & \<=89 mL/min/1.73m2 aged \>=1 and \< 18, separated by \>=90 days, without an intervening eGFR \>=90
+-   The Revised Bedside Schwartz formula is used to compute estimated glomerular filtration rate (eGFR), with a 90 day look-around for height measurements. We intend to used the CKiD U25 formulae to compute eGFR for the study, but used the Revised Bedside Schwartz formula for the feasibility query as it involves fewer data elements.
+
+## Attrition cohort
+
+```{r}
+all_site_attrition_count <- attrition %>%
+  group_by(step_num) %>%
+  summarize(all_site_count = sum(counts)) %>%
+  ungroup() %>%
+  filter(step_num == 10) %>%
+  pull(all_site_count)
+
+all_site_attrition_count_text <- all_site_attrition_count %>%
+  scales::comma()
+```
+
+Across all sites, `r all_site_attrition_count_text` patients meet the computational phenotype. This is expected to be an under-count, due to data quality issues. Table \@ref(tab:attr) tabulates the number of patients at each site for each step of the computational phenotype, whereas Table \@ref(tab:attrstep0) provides the percentage patients patients with \>=1 visit between January 2009 and December 2021 (Step 0 of the attrition) for each step. Figure \@ref(fig:attrplotstep0) and Figure \@ref(fig:attrplotstep0log) depict the percentage patients at Step 0 in graphical form. For Figure \@ref(fig:attrplotstep0log), a logarithmic scale is used to display values across a large range without compressing the lower values. We apply this transformation to the y axis for several attrition figures. Table \@ref(tab:attr), Table \@ref(tab:attrstep0), Figure \@ref(fig:attrplotstep0) and Figure \@ref(fig:attrplotstep0log) show that most sites follow the same general pattern. Sites `r sites$B`, `r sites$C`, `r sites$F`, `r sites$H`, and `r sites$P` have anomalous patterns of attrition, compared with other sites. Step 8, the application of a nephrology provider visit requirement, dramatically reduced cohort size at sites `r sites$B`, `r sites$F` and `r sites$P`. This is likely due to a data quality issue, which is explored further in Section \@ref(nephrology-specialty). Site `r sites$C` loses approximately 99% of its cohort when a height requirement is applied at Step 4, which may be due to missingness summarized in Section \@ref(height). For Site `r sites$H`, at Step 5, over 80% of patients with calculable eGFRs have at least one eGFR within the mild-to-moderate CKD range (\>=30 and \<=89 mL/min/1.73m2), which may be attributable to an anomalously low height distribution explored in Section \@ref(height).
+
+
+```{r attr}
+attrition %>%
+  select(step_num, counts, site_name) %>%
+  pivot_wider(names_from = site_name,
+              values_from = counts,
+              values_fill = 0) %>%
+  prettify_kable(table_caption = "Attrition: Patient counts")
+```
+
+```{r attrstep0}
+attrition %>%
+  select(step_num, percent_step0, site_name) %>%
+  pivot_wider(names_from = site_name,
+              values_from = percent_step0,
+              values_fill = 0) %>%
+  prettify_kable(table_caption = "Attrition: Percentage patients with >=1 visit between January 2009 and December 2021")
+```
+
+```{r attrplot, fig.cap = "Attrition: Patient counts", include = FALSE}
+attrition %>%
+  ggplot(aes(x = step_num, y = counts, colour = site_name, linetype = site_name)) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(trans = "log2", labels = scales::comma) +
+  preserve_feas_plot() +
+  scale_color_manual(values = site_colours,
+                     breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,
+                     breaks = attrition %>% distinct(site_name) %>% pull()) +
+  theme(legend.position = "bottom", legend.key.width = unit(1, "cm")) +
+  ylab("Patient count (logarithmic scale)") +
+  xlab("Attrition step") +
+  labs(colour = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(0, 10, by = 1))
+```
+
+```{r attrplotstep0, fig.cap = "Attrition: Percentage patients with >=1 visit between January 2009 and December 2021"}
+attrition %>%
+  ggplot(aes(x = step_num, y = percent_step0, colour = site_name, linetype = site_name)) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(labels = scales::comma) +
+  preserve_feas_plot() +
+  scale_color_manual(values = site_colours,
+                     breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,
+                     breaks = attrition %>% distinct(site_name) %>% pull()) +
+  theme(legend.position = "bottom",
+        legend.key.width = unit(1, "cm")) +
+  ylab("Percentage step 0 (linear scale)") +
+  xlab("Attrition step") +
+  labs(colour = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(0, 10, by = 1))
+```
+
+```{r attrplotstep0log, fig.cap = "Attrition: Percentage patients with >=1 visit between January 2009 and December 2021"}
+v43_attrition <- attrition %>%
+  ggplot(aes(x = step_num, y = percent_step0, colour = site_name, linetype = site_name)) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(trans = "log2", labels = scales::comma,
+                     breaks = c(0.001, 0.01, 0.1, 1, 5, 25, 100),
+                     limits = c(0.001, 100)) +
+  preserve_feas_plot() +
+  scale_color_manual(values = site_colours,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  theme(legend.position = "bottom", legend.key.width = unit(1, "cm")) +
+  ylab("Percentage step 0 (logarithmic scale)") +
+  xlab("Attrition step") +
+  labs(colour = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(0, 10, by = 1))
+
+v43_attrition %>% ggsave("../results/v43_attrition", device = "png")
+```
+
+Some sites are pediatric-specific include adult and pediatric patients in their source populations. Step 3, which restricts to patients aged \>=1 and \< 18 at time of \>=1 serum creatinine measurement, implements an age requirement. Examining the attrition as a proportion of Step 3 reduces variation due to differences in age range of source population, see Table \@ref(tab:attrstep3) and Figure \@ref(fig:attrstep3plot).
+
+```{r attrstep3}
+attrition %>%
+  select(step_num, percent_step3, site_name) %>%
+  filter(step_num >= 3) %>% 
+  pivot_wider(names_from = site_name,
+              values_from = percent_step3,
+              values_fill = 0) %>% 
+  prettify_kable(table_caption = "Attrition: Percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement")
+```
+
+```{r attrstep3plot, fig.cap="Attrition: Percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement"}
+attrition %>%
+  ggplot(aes(
+    x = step_num,
+    y = percent_step3,
+    colour = site_name,
+    linetype = site_name
+  )) +
+  geom_line(size = 0.6) +
+  scale_y_continuous(
+    trans = "log2",
+    labels = scales::comma,
+    breaks = c(0.001, 0.01, 0.1, 1, 5, 25, 100)
+  ) +
+  preserve_feas_plot() +
+  scale_color_manual(values = site_colours,
+                     breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,
+                        breaks = attrition %>% distinct(site_name) %>% pull()) +
+  theme(legend.position = "bottom",
+        legend.key.width = unit(1, "cm")) +
+  ylab("Percentage step 3 (logarithmic scale)") +
+  xlab("Attrition step") +
+  labs(colour = "Site", linetype = "Site") +
+  scale_x_continuous(breaks = seq(3, 10, by = 1), limits = c(3, 10))
+```
+
+We can also tabulate the percentage of the previous step, as in Table \@ref(tab:attrredprev). Examining Step 8, there is wide variation in how application of a requirement that a patient had \>=1 in-person visit with a nephrology provider at any time between January 2009 and December 2021 affected cohort size. This is likely due at least in part to a data quality issue, which is explored further in Section \@ref(nephrology-specialty).
+
+```{r attrredprev}
+attrition %>%
+  mutate(percent_red = 100 - percent_prior_step) %>% 
+  select(step_num, percent_prior_step, site_name) %>%
+  filter(step_num >= 2) %>% 
+  pivot_wider(names_from = site_name,
+              values_from = percent_prior_step,
+              values_fill = 0) %>% 
+  prettify_kable(table_caption = "Attrition table: Percentage previous attrition step")
+```
+
+Figure \@ref(fig:attrchtcounts) summarizes the size of the attrition cohort (Step 10). The y axis is the percentage patients at Step 3, which restricts to patients aged \>=1 and \< 18 at time of \>=1 serum creatinine measurement, and as such percentages are very small.
+
+```{r attrchtcounts, fig.cap = "Attrition cohort: Raw counts and percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement"}
+attr_cohort_summary <-
+  get_cohort_count_summary(attrition_table = attrition,
+                           count_table = dem_birth_yr %>%
+                             filter(attr_cht == 1))
+
+attr_cohort_summary[[1]]
+```
+
+## CKD Stage 2/3 diagnosis cohort
+
+Figure \@ref(fig:ckdstage23chtcounts) summarizes the size of the CKD Stage 2/3 diagnosis cohort. The y axis is the percentage patients at Step 3, and as such percentages are very small.
+
+```{r ckdstage23chtcounts, fig.cap = "CKD Stage 2/3 diagnosis cohort cohort: Raw counts and percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement"}
+ckd_stage23_cohort_summary <-
+  get_cohort_count_summary(attrition_table = attrition,
+                           count_table = dem_birth_yr %>%
+                             filter(ckd_stage23 == 1))
+
+ckd_stage23_cohort_summary[[1]]
+```
+
+## High serum creatinine cohort
+
+Figure \@ref(fig:highscrchtcounts) summarizes the size of the high serum creatinine cohort. The y axis is the percentage patients at Step 3, and as such percentages are very small. Site `r sites$J` is an outlier with \>23,000 patients and Site `r sites$H` does not have any patients meeting the cohort definition. Analyses in Section \@ref(serum-creatinine) do not indicate any data quality issues affect serum creatinine values for these sites. As such, the issue may be due to data quality issues specific to the upper limit of normal information provided with the serum creatinine lab. Further investigation is necessary.
+
+```{r highscrchtcounts, fig.cap = "High serum creatinine cohort: Raw counts and percentage patients aged >=1 and < 18 at time of >=1 serum creatinine measurement"}
+high_scr_cohort_summary <-
+  get_cohort_count_summary(attrition_table = attrition,
+                           count_table = dem_birth_yr %>%
+                             filter(high_scr == 1))
+
+high_scr_cohort_summary[[1]]
+```
+
+## Cohort overlap
+
+Figure \@ref(fig:venn) shows overlap for the 3 cohorts across all sites, whereas Figure \@ref(fig:venn2) removes Site `r sites$J`'s anomalously large high serum creatinine cohort. Future data quality analyses might interrogate unexpected lack of overlap between the 3 cohorts. For example, patients who receive a CKD Stage 2/3 diagnosis, but do not meet the attrition cohort definition may be informative about about data quality issues associated with eGFR or nephrology specialty. In contrast, we would not expect that all patients in the attrition cohort receive a CKD Stage 2/3 diagnosis, as diagnosis codes with this level of granularity are not necessarily used for all patients with mild-to-moderate CKD.
+
+```{r venn, fig.cap="Venn Diagram of CKD cohort overlap", fig.width=5, fig.height=5}
+draw_ckd_cohort_venn(dem_birth_yr)
+```
+
+```{r venn2, fig.cap="Venn Diagram of CKD cohort overlap", fig.width=5, fig.height=5}
+draw_ckd_cohort_venn(dem_birth_yr %>%
+                       filter(
+                         !(site_name == "J" & high_scr == 1) &
+                           !(site_name == "site_J" & high_scr == 1)
+                       ))
+```
+
+## Demographic and clinical characteristics
+
+In this section, we some demographic and clinical characteristics for each cohort. Total cohort size for each cohort is provided in Table \@ref(tab:totalcohortsize). The anomalously large high serum creatinine cohort is driven by Site `r sites$J`, as noted in Section \@ref(high-serum-creatinine-cohort).
+
+```{r cohortcharprep}
+# Reshape enc_ced_fu table
+fu_wide <-
+  enc_ced_fu %>%
+  mutate(n = 1) %>%
+  pivot_wider(names_from = 'prefix',
+              values_from = 'n',
+              values_fill = 0)
+
+# Compute medians
+fu_medians <- find_medians_from_computed(tbl_name = fu_wide,
+                                         tbl_name_string =
+                                           'median follow up',
+                                         med_col = 'median_days_ced_fu')
+
+# Convert follow-up in days to years
+fu_median_yrs <-
+  fu_medians %>%
+  mutate_if(is.numeric, make_yrs)
+
+# Cohort Entry
+# Age
+ce_age_medians <- find_medians_from_raw(tbl_name = dem_ce_age,
+                                        tbl_name_string = 'Median cohort entry year of age',
+                                        med_col = 'ce_age_years')
+# Calendar year
+ce_yr_medians <- find_medians_from_raw(tbl_name = dem_ce_yr,
+                                        tbl_name_string = 'Median cohort entry calendar year',
+                                        med_col = 'ce_calendar_year')
+
+## Denominator Counts: outpatient Encounters
+op_encs <- find_sums(
+  tbl_name=enc_type_cts %>% 
+    filter(ENC_TYPE=='AV') %>%
+    group_by(year), 
+  tbl_name_string = 'AV encounters'
+  )
+
+## Denominator Counts: Cohort Entry Year
+cey <- find_sums(
+  tbl_name=dem_ce_yr %>% rename(year=ce_calendar_year) %>%
+    mutate(n_rows=1) %>%
+    group_by(year),
+  tbl_name_string='cohort entry year'
+)
+
+cey_by_site <- find_sums(
+  tbl_name=dem_ce_yr %>% rename(year=ce_calendar_year) %>%
+    mutate(n_rows=1) %>%
+    group_by(site_name, year),
+  tbl_name_string='cohort entry year'
+)
+
+## Cumulative sum of patients in cohort by calendar year
+cey_rolling_sum <- 
+  cey %>% 
+  distinct(
+    year,
+    sum_pts_sites,
+    cohort
+    ) %>% 
+  group_by(
+    cohort
+  ) %>%
+  arrange(year) %>% 
+  mutate(
+    rolling_sum=cumsum(sum_pts_sites)
+  )
+
+## Cumulative sum of patients in cohort by calendar year, by site
+cey_rolling_sum_by_site <- 
+  cey_by_site %>% 
+  distinct(
+    site_name,
+    year,
+    sum_pts_sites,
+    cohort
+    ) %>% 
+  group_by(
+    cohort,
+    site_name
+  ) %>%
+  complete() %>% 
+  arrange(site_name, cohort, year) %>% 
+  mutate(
+    rolling_sum=cumsum(sum_pts_sites)
+  )
+
+all_drugs_df <- get_drug_summary_table(codeset_cts_tbl = codeset_cts,
+                                       denom_tbl = op_encs) %>%
+  mutate(
+    median_percent = median_prop * 100,
+    min_percent = min_prop * 100,
+    max_percent = max_prop * 100
+  ) %>% 
+  select(measure, cohort, median_percent, min_percent, max_percent)
+```
+
+```{r createtables}
+demogs <- dplyr::union(
+  ce_age_medians,
+  ce_yr_medians,
+  fu_median_yrs
+)
+
+race <- find_counts(dem_cats,
+                    med_col = "RACE")
+hispanic <- find_counts(dem_cats,
+                        med_col = "HISPANIC")
+sex <- find_counts(dem_cats,
+                   med_col = "SEX")
+site <- find_counts(dem_cats,
+                   med_col = "site_name")
+dem_cat_summary <- race %>% 
+  dplyr::union(hispanic) %>%
+  dplyr::union(sex) %>%
+  arrange(measure,
+          category)
+```
+
+```{r totalcohortsize}
+attr_cohort_total <- all_site_attrition_count
+high_scr_cohort_total <- high_scr_cohort_summary[[2]] %>%
+  filter(!is.na(counts)) %>%
+  summarize(total_count = sum(counts)) %>%
+  pull(total_count)
+ckd_stage23_cohort_total <- ckd_stage23_cohort_summary[[2]] %>%
+  filter(!is.na(counts)) %>%
+  summarize(total_count = sum(counts)) %>%
+  pull(total_count)
+
+tibble(
+  "measure" = c("Total patients"),
+  "attr_cht" = c(attr_cohort_total),
+  "ckd_stage23" = c(ckd_stage23_cohort_total),
+  "high_scr" = c(high_scr_cohort_total)
+) %>%
+  add_cohort_fullnames() %>%
+  prettify_kable(table_caption = "Total patients")
+
+```
+
+For cohort entry, median year of age and calendar year was extracted for each sites. Table \@ref(tab:cohortentry) summarizes across these medians to provide the overall median, with the minimum and maximum medians provided in parentheses. Table \@ref(tab:minmaxceyr) provides the minimum and maximum cohort entry calendar year for each site, also illustrated by Figure \@ref(fig:minmaxceyrplot).
+
+```{r cohortentry}
+demogs %>%
+  mutate(values = paste0(median_value, " (", min_value, " - ", max_value, ")")) %>%
+  select(measure, cohort, values) %>%
+  pivot_wider(values_from = values,
+              names_from = cohort) %>%
+  select(measure, attr_cht, ckd_stage23, high_scr) %>%
+  add_cohort_fullnames() %>%
+  kable(digits = 2, caption = "Cohort entry - overall median (minimum - maximum)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = T, border_right = T)
+```
+
+```{r minmaxceyr}
+dem_ce_yr_attr_cht <- dem_ce_yr %>%
+  filter(attr_cht == 1) %>%
+  mutate(cohort = "attr_cht")
+dem_ce_yr_high_scr <- dem_ce_yr %>%
+  filter(high_scr == 1) %>%
+  mutate(cohort = "high_scr")
+dem_ce_yr_ckd_stage23 <- dem_ce_yr %>%
+  filter(ckd_stage23 == 1) %>%
+  mutate(cohort = "ckd_stage23")
+
+dem_ce_yr_attr_cht %>%
+  dplyr::union(dem_ce_yr_high_scr) %>%
+  dplyr::union(dem_ce_yr_ckd_stage23) %>%
+  group_by(cohort, site_name) %>%
+  summarize(
+    min_calendar_year = min(ce_calendar_year),
+    max_calendar_year = max(ce_calendar_year)
+  ) %>%
+  full_join(distinct(dem_ce_yr, site_name), by = "site_name") %>%
+  mutate(calendar_years = paste0(min_calendar_year, " - ", max_calendar_year)) %>%
+  select(site_name, cohort, calendar_years) %>%
+  pivot_wider(values_from = calendar_years,
+              names_from = cohort) %>%
+  add_cohort_fullnames() %>%
+  kable(digits = 2, caption = "Minimum and maximum cohort entry years") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = T, border_right = T)
+```
+
+```{r minmaxceyrplot, fig.cap="Attrition cohort: Minimum and maximum cohort entry years"}
+dem_ce_yr_attr_cht %>%
+  dplyr::union(dem_ce_yr_high_scr) %>%
+  dplyr::union(dem_ce_yr_ckd_stage23) %>%
+  group_by(cohort, site_name) %>%
+  summarize(
+    min_calendar_year = min(ce_calendar_year),
+    max_calendar_year = max(ce_calendar_year)
+  ) %>%
+  full_join(distinct(dem_ce_yr, site_name), by = "site_name") %>%
+  ggplot() +
+  geom_errorbar(
+    aes(
+      x = forcats::fct_rev(site_name),
+      ymin = min_calendar_year,
+      ymax = max_calendar_year,
+      colour = site_name,
+      linetype = site_name
+    )
+  ) +
+  scale_color_manual(values = site_colours,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  preserve_feas_plot() +
+  coord_flip() +
+  xlab("Site") +
+  ylab("Calendar year") +
+  facet_wrap( ~ cohort,
+              labeller = labeller(
+                cohort = c(
+                  "attr_cht" = "Attrition",
+                  "ckd_stage23" = "CKD Stage 2/3",
+                  "high_scr" = "High serum creatinine"
+                )
+              ))
+```
+
+Table \@ref(tab:demcatsummary) provides a breakdown across demographic categories. Slight discrepancies may exist between total counts in this table versus in the attrition due to small cell size suppression and patients for whom demographic information was unavailable.
+
+```{r demcatsummary}
+dem_cat_summary %>%
+  mutate(values = paste0(
+    scales::comma(count, accuracy = 1),
+    " (",
+    round(percent, digits = 1),
+    "%)"
+  )) %>%
+  select(measure, category, cohort, values) %>%
+  pivot_wider(values_from = values,
+              names_from = cohort) %>%
+  select(measure, category, attr_cht, ckd_stage23, high_scr) %>%
+  add_cohort_fullnames() %>%
+  prettify_kable(table_caption = "Demographic categories - N (%)")
+```
+
+Table \@ref(tab:alldrugsdf) summarizes drug exposures as a median, minimum and maximum percentage patients with an ambulatory visit in each calendar year. Drug exposures are separated by prescriptions and administrations.
+
+```{r alldrugsdf}
+all_drugs_df %>%
+  mutate(values = paste0(round(median_percent, digits = 1), " (",
+                         round(min_percent, digits = 1), " - ",
+                         round(max_percent, digits = 1), ")")) %>%
+  select(measure, cohort, values) %>%
+  pivot_wider(values_from = values,
+              names_from = cohort) %>%
+  add_cohort_fullnames() %>%
+  prettify_kable(table_caption = "Percentage patients with drug exposure - median (minimum - maximum)")
+```
+
+# Data element examination
+
+In the Data element examination section of the report, key data elements are examined for the union of the 3 CKD cohorts, **excluding Site `r sites$J`'s high serum creatinine cohort**, unless otherwise specified. This approach is taken to maximize cohort size at each site, enabling data quality issues to be identified.
+
+```{r}
+codeset_cts <- filter_cohorts(codeset_cts)
+
+# Demographics / Table 1 type info
+dem_birth_yr <- filter_cohorts(dem_birth_yr)
+
+dem_cats <- filter_cohorts(dem_cats)
+dem_ce_age <- filter_cohorts(dem_ce_age)
+dem_ce_yr <- filter_cohorts(dem_ce_yr)
+enc_ced_fu <- filter_cohorts(enc_ced_fu)
+enc_ip_fu <- filter_cohorts(enc_ip_fu)
+
+# Visits
+enc_type_cts <- filter_cohorts(enc_type_cts)
+prov_neph <- filter_cohorts(prov_neph)
+
+# Diagnoses
+cond_dx_cts <- filter_cohorts(cond_dx_cts)
+diag_dx_cts <- filter_cohorts(diag_dx_cts)
+
+# Medications
+disp_rx_cts <- filter_cohorts(disp_rx_cts)
+med_rx_cts <- filter_cohorts(med_rx_cts)
+pres_rx_cts <- filter_cohorts(pres_rx_cts)
+
+# Labs
+lab_loinc_cts <- filter_cohorts(lab_loinc_cts)
+lab_vals1 <- filter_cohorts(lab_vals1)
+lab_vals2 <- filter_cohorts(lab_vals2)
+lab_vals3 <- filter_cohorts(lab_vals3)
+lab_vals4 <- filter_cohorts(lab_vals4)
+lab_vals5 <- filter_cohorts(lab_vals5)
+lab_vals6 <- filter_cohorts(lab_vals6)
+lab_vals7 <- filter_cohorts(lab_vals7)
+lab_vals8 <- filter_cohorts(lab_vals8)
+
+# Procedures
+proc_px_cts <- filter_cohorts(proc_px_cts)
+
+# Measurements
+vital_dia_bp_vals <- filter_cohorts(vital_dia_bp_vals)
+vital_dia_bp_cts <- filter_cohorts(vital_dia_bp_cts)
+vital_ht_cts <- filter_cohorts(vital_ht_cts)
+vital_ht_vals <- filter_cohorts(vital_ht_vals)
+vital_sys_bp_cts <- filter_cohorts(vital_sys_bp_cts)
+vital_sys_bp_vals <- filter_cohorts(vital_sys_bp_vals)
+vital_wt_cts <- filter_cohorts(vital_wt_cts)
+vital_wt_vals <- filter_cohorts(vital_wt_vals)
+```
+
+## Cohort entry year
+
+Figure \@ref(fig:minmaxceyrplotunion) shows the distribution of cohort entry calendar year across sites. For several sites, the earliest cohort entry calendar years are after 2009.
+
+```{r minmaxceyrplotunion, fig.cap="Minimum and maximum cohort entry years"}
+dem_ce_yr %>%
+  group_by(site_name) %>%
+  summarize(
+    min_calendar_year = min(ce_calendar_year),
+    max_calendar_year = max(ce_calendar_year)
+  ) %>%
+  full_join(distinct(dem_ce_yr, site_name), by = "site_name") %>%
+  ggplot() +
+  geom_errorbar(aes(x = forcats::fct_rev(site_name), ymin = min_calendar_year,
+                    ymax = max_calendar_year, colour = site_name, linetype = site_name)) +
+  scale_color_manual(values = site_colours,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  scale_linetype_manual(values = site_linetypes,                      breaks = attrition %>% distinct(site_name) %>% pull()) +
+  preserve_feas_plot() +
+  coord_flip() +
+  xlab("Site") +
+  ylab("Calendar year")
+```
+
+## Follow up time
+
+Two definitions of follow-up time are examined:
+
+1.  Cohort entry date to last in-person encounter
+
+2.  First to last in-person encounter
+
+### Cohort entry date to last in-person encounter
+
+Figure \@ref(fig:cedfu) shows the distribution of mean and median follow-up at each site. Table \@ref(tab:cedfutable) includes the mean, median, minimum, and maximum duration follow-up in years across sites. Sites `r sites$L` and `r sites$M` are outliers for maximum follow-up, however this may be due to future dates which were not restricted for the feasibility query.
+
+```{r cedfu, fig.cap="Mean and median duration between cohort entry data and last in-person encounter (years)"}
+enc_ced_fu %>%
+  filter(!n_patids == 0) %>%
+  mutate(
+    median_res = median_days_ced_fu / 365.25,
+    mean_res = mean_days_ced_fu / 365.25
+  ) %>%
+  dot_plot_result_vitals(xmin = 2,
+                         xlab_name = "Duration between cohort entry data and last in-person encounter (years)",
+                         result_ceiling = 8)
+```
+
+```{r cedfutable}
+enc_ced_fu %>%
+  filter(!n_patids == 0) %>%
+  group_by(site_name) %>%
+  summarize(
+    mean = mean(mean_days_ced_fu) / 365.25,
+    median = mean(median_days_ced_fu) / 365.25,
+    min = mean(min_days_ced_fu) / 365.25,
+    max = mean(max_days_ced_fu) / 365.25,
+  ) %>% 
+  ungroup() %>%
+  prettify_kable(table_caption = "Duration between cohort entry data and last in-person encounter (years)")
+```
+
+### First to last in-person encounter
+
+Figure \@ref(fig:ipfu) shows the distribution of mean and median follow-up at each site. Table \@ref(tab:ipfutable) includes the mean, median, minimum, and maximum duration follow-up in years across sites. Sites `r sites$L` and `r sites$M` are outliers for maximum follow-up, however, as above, this may be due to future dates which were not restricted for the feasibility query.
+
+```{r ipfu, fig.cap="Mean and median duration between first and last in-person encounter"}
+enc_ip_fu %>%
+  filter(!n_patids == 0) %>%
+  mutate(
+    median_res = median_days_ip_fu / 365.25,
+    mean_res = mean_days_ip_fu / 365.25
+  ) %>%
+  dot_plot_result_vitals(xmin = 3,
+                         xlab_name = "Duration between first and last in-person encounter (years)",
+                         result_ceiling = 12)
+```
+
+```{r ipfutable}
+enc_ip_fu %>%
+  filter(!n_patids == 0) %>%
+  group_by(site_name) %>%
+  summarize(
+    mean = mean(mean_days_ip_fu) / 365.25,
+    median = mean(median_days_ip_fu) / 365.25,
+    min = mean(min_days_ip_fu) / 365.25,
+    max = mean(max_days_ip_fu) / 365.25,
+  ) %>% 
+  ungroup() %>%
+  prettify_kable(table_caption = "Duration between first and last in-person encounter (years)")
+```
+
+## Nephrology specialty {#nephrology-specialty}
+
+Figure \@ref(fig:attrstep8) depicts the percentage previous step at attrition Step 8, which implements a nephrology visit criterion. Sites `r sites$I` and `r sites$O` have higher percentages, at around 50%. For sites `r sites$B`, `r sites$F`, and `r sites$P`, none, or a very limited number of patients meet this criterion. The remainder of sites fall between 15 and 35%.
+
+```{r attrstep8, fig.cap="Step 8: Percentage previous attrition step"}
+attrition %>%
+  mutate(percent_red = 100 - percent_prior_step) %>%
+  select(step_num, percent_prior_step, site_colour, site_name) %>%
+  filter(step_num == 8) %>%
+  mutate(
+    cluster = case_when(
+      percent_prior_step < 5 ~ "1.",
+      percent_prior_step < 40 &
+        percent_prior_step >= 5 ~ "2.",
+      percent_prior_step >= 40 ~ "3."
+    )
+  ) %>%
+  ggplot(aes(
+    x = site_name,
+    y = percent_prior_step,
+    label = round(percent_prior_step, digits = 1)
+  ))  +
+  scale_fill_grey() +
+  xlab("Site") +
+  ylab("Percentage previous attrition step") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(panel.background = element_rect(colour="black",size=1),
+        panel.grid = element_blank()) +
+  geom_col(alpha = 0.75, position = position_dodge()) +
+  facet_grid(. ~ cluster, scales = "free_x", space = "free") +
+  geom_label(fill = "white")
+```
+
+Table \@ref(tab:nephspecprov) is the codeset for nephrology provider specialty value-set items. Table \@ref(tab:unmapneph) provides information about RAW_PROVIDER_SPECIALTY_PRIMARY fields which were identified as being potentially unmapped or mis-mapped in the feasibility query.
+
+```{r nephspecprov}
+read_codeset("nephrology_spec_prov") %>% 
+  prettify_kable(table_caption = "PROVIDER_SPECIALTY_PRIMARY from nephrology specialty codeset")
+```
+
+```{r unmapneph}
+unmap_neph %>% 
+  left_join(read_codeset("nephrology_spec_prov"),
+            by = c("PROVIDER_SPECIALTY_PRIMARY" = "VALUESET_ITEM")) %>%
+  mutate(mapped_to_codeset = !is.na(VALUESET_ITEM_DESCRIPTOR)) %>%
+  filter(mapped_to_codeset == FALSE) %>%
+  select(site_name, RAW_PROVIDER_SPECIALTY_PRIMARY, PROVIDER_SPECIALTY_PRIMARY) %>% 
+  left_join(read_codeset("provider_specialty_primary"),
+            by = c("PROVIDER_SPECIALTY_PRIMARY" = "VALUESET_ITEM")) %>%
+  select(site_name, RAW_PROVIDER_SPECIALTY_PRIMARY,
+         PROVIDER_SPECIALTY_PRIMARY, VALUESET_ITEM_DESCRIPTOR) %>% 
+  group_by(site_name, RAW_PROVIDER_SPECIALTY_PRIMARY) %>% 
+  summarize(other_PROVIDER_SPECIALTY_PRIMARY = list(unique(VALUESET_ITEM_DESCRIPTOR))) %>% 
+  ungroup() %>% 
+  prettify_kable(table_caption = "Nephrology-related RAW_PROVIDER_SPECIALTY_PRIMARY not mapped to PROVIDER_SPECIALTY_PRIMARY from nephrology specialty codeset")
+```
+
+## Labs
+
+### Overall
+
+```{r labheatmapprep}
+labs<-lab_loinc_cts %>%
+  rename("concept_code"="LAB_LOINC") 
+
+serum_creatinine_codes <- read_csv("../specs/serum_creatinine.csv",
+                                   col_types = "icccc")
+serum_cystatin_codes <- read_csv("../specs/serum_cystatin.csv",
+                                   col_types = "icccc")
+urine_protein_quant_codes <- read_csv("../specs/urine_protein_quant.csv",
+                                   col_types = "icccc")
+urine_protein_qual_codes <- read_csv("../specs/urine_protein_qual.csv",
+                                   col_types = "icccc")
+urine_creatinine_codes <- read_csv("../specs/urine_creatinine.csv",
+                                   col_types = "icccc")
+```
+
+Figure \@ref(fig:alllabpercents) depicts the percentage patients with at least one drug exposure within each medication category for each calendar year, where the denominator is the number of patients in the cohort with an ambulatory visit. Serum creatinine labs are available for approximately 75% of the cohort. Serum cystatin labs are available for approximately 25% of the cohort in more recent calendar years.
+
+```{r alllabpercents, fig.cap="Percentage patients with at least one lab measurement across calendar year"}
+codeset_cts %>%
+  filter(
+    codeset %in% c(
+      "serum_creatinine",
+      "serum_cystatin",
+      "urine_protein_quant",
+      "urine_protein_qual",
+      "urine_creatinine"
+    )
+  ) %>%
+  cross_codeset_comparison(denom = enc_type_cts,
+                           codeset_ct_tbl = .,
+                           ymax = 90)
+```
+
+### Serum creatinine
+
+#### Counts
+
+Table \@ref(tab:serumcreatininemissing) indicates calendar years without serum creatinine lab data for each site. For sites with this data, Figure \@ref(fig:serumcreatininepercents) depicts the percentage patients with at least one serum creatinine lab measurement for each calendar year, where the denominator is the number of patients in the cohort with an ambulatory visit. Figure \@ref(fig:serumcreatinineheatmap) shows the distribution of lab code usage, with counts limited to one code per calendar year for each patient. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code. Analogous tables and visualizations are produced for each lab.
+
+```{r serumcreatininemissing}
+get_missing_years(codeset_cts, 'serum_creatinine') %>%
+  prettify_kable(table_caption = "Serum creatinine: Calendar years with missing data")
+```
+
+```{r serumcreatininepercents, fig.cap="Serum creatinine: Percentage patients with ambulatory visit with lab"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "serum_creatinine",
+                      ylim_max = 100)
+```
+
+```{r serumcreatinineheatmap, fig.length = 5, fig.cap="Serum creatinine: Heatmap of frequent lab codes"}
+serum_creatinine_heatmap<-labs %>%
+  make_code_table(., serum_creatinine_codes) %>%
+  make_heatmap(main="Serum creatinine lab codes",
+               cexRow=0.9)
+```
+
+#### Values
+
+Figure \@ref(fig:serumcreatininevals) shows the distribution of mean and median results for each lab code at each site. The blue dashed vertical line indicates the result maximum threshold applied to these values for the purposes of this visualization. Values above the result maximum threshold are replaced by this result maximum. For example, in the visualization below, Site `r site$A`'s median value for 2160-0 was above 10 mg/dL and is replaced with 10 mg/dL. An analogous visualization is provided for each quantitative lab in this report.
+
+```{r serumcreatininevals, fig.cap = "Serum creatinine: Distribution of lab values"}
+lab_vals2 %>%
+  dot_plot_results(
+    codeset_name = 'serum_creatinine',
+    unit_type = 'mg/dL',
+    result_ceiling = 10
+  )
+```
+
+#### Potentially unmapped or missed labs
+
+Table \@ref(tab:unmapscr2) shows raw lab name and specimen information for some potential serum creatinine measurements which were not included in the original codeset. For Sites `r sites$P` and `r sites$F` below, the RAW_LAB_NAME and SPECIMEN_SOURCE fields do not include specimen information, but the labs are mapped to urine creatinine measurements; 14683-7 (Creatinine [Moles/volume] in Urine) and 14683-7 (Creatinine [Mass/volume] in Urine). Further data quality exploration should ensure these mappings are correct.
+
+```{r serumcreatinine, include = FALSE}
+read_codeset("serum_creatinine") %>%
+  select(-concept_id) %>% 
+  prettify_kable(table_caption = "Serum creatinine codeset")
+```
+
+```{r unmapscr, include = FALSE}
+unmap_scr1 %>% 
+  left_join(read_codeset("serum_creatinine"),
+            by = c("LAB_LOINC" = "concept_code")) %>%
+  mutate(mapped_to_codeset = !is.na(concept_name)) %>%
+  filter(mapped_to_codeset == TRUE,
+         SPECIMEN_SOURCE == "URINE")
+```
+
+```{r unmapscr2}
+serum_creatinine <- read_codeset("serum_creatinine") %>% mutate(mapped_to_serum_creatinine = TRUE)
+urine_creatinine <- read_codeset("urine_creatinine") %>% mutate(mapped_to_serum_creatinine = FALSE)
+
+creatinine <- union(serum_creatinine, urine_creatinine)
+
+unmap_scr1 %>%
+  left_join(creatinine,
+            by = c("LAB_LOINC" = "concept_code")) %>%
+  mutate(
+    mapped_to_serum_creatinine = if_else(
+      mapped_to_serum_creatinine == FALSE |
+        is.na(mapped_to_serum_creatinine),
+      FALSE,
+      mapped_to_serum_creatinine
+    )
+  ) %>%
+  filter(
+    mapped_to_serum_creatinine == FALSE,
+    SPECIMEN_SOURCE != "URINE",
+    RAW_LAB_NAME %in% c(
+      "CREATININE",
+      "Creatinine",
+      "CREATININE CONCENTRATION",
+      "Creatinine, Serum (CRCL )"),
+      n_patids > 50) %>%
+  group_by(LAB_LOINC, RAW_LAB_NAME, SPECIMEN_SOURCE) %>%
+  summarize(site_names = list(unique(site_name))) %>%
+  ungroup() %>%
+  prettify_kable(table_caption = "Other potential serum creatinine measurements")
+```
+
+### Serum cystatin
+
+#### Counts
+
+Table \@ref(tab:serumcystatinmissing) indicates calendar years without serum cystatin data, whereas Figure \@ref(fig:serumcystatinpercents) depicts the percentage patients with an ambulatory visit with at least one serum cystatin lab across time. No heatmap is provided as only one LOINC code was used across sites for serum cystatin: 33863-2 (Cystatin C [Mass/volume] in Serum or Plasma).
+
+```{r serumcystatinmissing}
+get_missing_years(codeset_cts, 'serum_cystatin') %>%
+  prettify_kable(table_caption = "Serum cystatin: Calendar years with missing data")
+```
+
+```{r serumcystatinpercents, fig.cap="Serum cystatin: Percentage patients with ambulatory visit with lab"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "serum_cystatin",
+                      ylim_max = 75)
+```
+
+#### Values
+
+Figure \@ref(fig:serumcystatinvals) shows the distribution of mean and median results for each lab code at each site.
+
+```{r serumcystatinvals, fig.cap = "Serum cystatin: Distribution of lab values"}
+lab_vals2 %>%
+  dot_plot_results(
+    codeset_name = 'serum_cystatin',
+    unit_type = 'mg/L',
+    result_ceiling = 5
+  )
+```
+
+### Urine creatinine
+
+#### Counts
+
+Table \@ref(tab:urinecreatininemissing) indicates calendar years without urine creatinine data, whereas Figure \@ref(fig:urinecreatininepercents) depicts the percentage patients with an ambulatory visit with at least one urine creatinine lab across time.
+
+```{r urinecreatininemissing}
+get_missing_years(codeset_cts, 'urine_creatinine') %>%
+  prettify_kable(table_caption = "Urine creatinine: Calendar years with missing data")
+```
+
+```{r urinecreatininepercents, fig.cap="Urine creatinine: Percentage patients with ambulatory visit with lab"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "urine_creatinine",
+                      ylim_max = 75)
+```
+
+```{r urinecreatinineheatmap, fig.length = 5, fig.cap="Serum cystatin: Heatmap of frequent lab codes"}
+labs %>%
+  make_code_table(., urine_creatinine_codes) %>%
+  make_heatmap2(main="Urine creatinine lab codes")
+```
+
+#### Values
+
+Figure \@ref(fig:urinecreatininevals) shows the distribution of mean and median results for each lab code at each site.
+
+```{r urinecreatininevals, fig.cap = "Urine creatinine: Distribution of lab values"}
+lab_vals2 %>%
+  dot_plot_results(
+    codeset_name = 'urine_creatinine',
+    unit_type = 'mg/dL',
+    result_ceiling = 300
+  )
+```
+
+### Qualitative urine protein
+
+#### Counts
+
+Table \@ref(tab:urineproteinqualmissing) indicates calendar years without qualitative urine protein data, whereas Figure \@ref(fig:urineproteinqualpercents) depicts the percentage patients with an ambulatory visit with at least one qualitative urine protein lab across time.
+
+```{r urineproteinqualmissing}
+get_missing_years(codeset_cts, 'urine_protein_qual') %>%
+  prettify_kable(table_caption = "Qualitative urine protein: Calendar years with missing data")
+```
+
+```{r urineproteinqualpercents, fig.cap="Qualitative urine protein: Percentage patients with ambulatory visit with lab"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "urine_protein_qual",
+                      ylim_max = 80)
+```
+
+```{r urineproteinqualheatmap, fig.length = 5, fig.cap="Serum cystatin: Heatmap of frequent lab codes"}
+labs %>%
+  make_code_table(., urine_protein_qual_codes) %>%
+  make_heatmap2(main="Qualitative urine protein lab codes")
+```
+
+### Quantitative urine protein
+
+#### Counts
+
+Table \@ref(tab:urineproteinquantmissing) indicates calendar years without quantitative urine protein data, whereas Figure \@ref(fig:urineproteinquantpercents) depicts the percentage patients with an ambulatory visit with at least one quantitative urine protein lab across time.
+
+```{r urineproteinquantmissing}
+get_missing_years(codeset_cts, 'urine_protein_quant') %>%
+  prettify_kable(table_caption = "Urine protein: Calendar years with missing data")
+```
+
+```{r urineproteinquantpercents, fig.cap="Urine protein: Percentage patients with ambulatory visit with lab"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "urine_protein_quant",
+                      ylim_max = 100)
+```
+
+```{r urineproteinquantheatmap, fig.length = 5, fig.cap="Serum cystatin: Heatmap of frequent lab codes"}
+labs %>%
+  make_code_table(., urine_protein_quant_codes) %>%
+  make_heatmap2(main= "Quantitative urine protein lab codes")
+```
+
+#### Values
+
+Figure \@ref(fig:urineproteinquantvals) shows the distribution of mean and median results for each lab code at each site.
+
+```{r urineproteinquantvals, fig.cap = "Quantitative urine protein: Distribution of lab values"}
+lab_vals2 %>%
+  dot_plot_results(
+    codeset_name = 'urine_protein_quant',
+    unit_type = 'mg/dL',
+    result_ceiling = 750
+  )
+```
+
+
+## Medications
+
+### Overall
+
+The following categories of medication were explored for the feasibility query: ACE inhibitors, Angiotensin receptor blockers, Beta blockers, Calcium channel blockers, Loop diuretics, and Thiazides. Figures \@ref(fig:allrxpercentspres) and \@ref(fig:allrxpercentsadmin) depict the percentage patients with at least one drug exposure within each medication category for each calendar year, where the denominator is the number of patients in the cohort with an ambulatory visit. Figures \@ref(fig:allrxheatmappres) and \@ref(fig:allrxheatmapadmin) show the distribution across medication category for prescriptions and administrations, respectively. The shading represents the distribution across categories within each site, with a darker shade indicating that a larger proportion of patients in the cohort receiving a drug from the category. Across sites, ACE inhibitors and Calcium channel blockers are most frequent for prescription records (Figures \@ref(fig:allrxheatmappres) and \@ref(fig:allrxpercentspres)), whereas Loop diuretics and Calcium channel blockers are most frequent for medication administration records (Figures \@ref(fig:allrxheatmapadmin) and \@ref(fig:allrxpercentsadmin). Sites `r sites$C` and `r sites$B` do not fit the general pattern for prescription records. Sites `r sites$K` and `r sites$F` do not fit the general pattern for medication administrations. Further data quality analyses can investigate the source of these anomalies.
+
+```{r}
+prescriptions <- pres_rx_cts %>%
+  rename("concept_code" = "RXNORM_CUI")
+administrations <- med_rx_cts %>%
+  rename("concept_code" = "MEDADMIN_CODE")
+
+ace_inhibitor_codes <- read_codeset("ace_inhibitor_rx",
+                                    col_types = "icccccc")
+bb_codes <- read_codeset("bb_rx",
+                         col_types = "icccccc")
+ccb_codes <- read_codeset("ccb_rx",
+                          col_types = "icccccc")
+arb_codes <- read_codeset("arb_rx",
+                          col_types = "icccccc")
+thiazide_codes <- read_codeset("thiazide_rx",
+                               col_types = "icccccc")
+loop_diuretics_codes <- read_codeset("loop_diuretics_rx",
+                                     col_types = "icccccc")
+
+ace_inhibitor_codes$rx_category <- "ACE inhibitors"
+bb_codes$rx_category <- "Beta blockers"
+ccb_codes$rx_category <- "Calcium channel blockers"
+arb_codes$rx_category <- "Angiotensin receptor blockers"
+thiazide_codes$rx_category <- "Thiazide"
+loop_diuretics_codes$rx_category <- "Loop diuretics"
+
+rx_codes <-
+  rbind(ace_inhibitor_codes,
+        bb_codes,
+        ccb_codes,
+        arb_codes,
+        thiazide_codes,
+        loop_diuretics_codes)
+```
+
+```{r allrxheatmappres, fig.cap="Heatmap of drug category distribution (prescriptions)"}
+prescriptions %>%
+  make_code_table(rx_codes) %>%
+  make_heatmap(grp_by = "rx_category")
+```
+
+```{r allrxpercentspres, fig.cap="Percentage patients with at least one drug exposure across calendar year (prescriptions)"}
+codeset_cts %>%
+  filter(
+    codeset %in% c(
+      "bb_rx",
+      "ccb_rx",
+      "ace_inhibitor_rx",
+      "arb_rx",
+      "thiazide_rx",
+      "loop_diuretic_rx"
+    ),
+    prefix == "pres"
+  ) %>%
+  cross_codeset_comparison(denom = enc_type_cts,
+                           codeset_ct_tbl = .,
+                           ymax = 20)
+```
+
+```{r allrxheatmapadmin, fig.cap="Heatmap of drug category distribution (administrations)"}
+administrations %>%
+  make_code_table(rx_codes) %>%
+  make_heatmap(grp_by = "rx_category")
+```
+
+```{r allrxpercentsadmin, fig.cap="Percentage patients with at least one drug exposure across calendar year (administrations)"}
+codeset_cts %>%
+  filter(
+    codeset %in% c(
+      "bb_rx",
+      "ccb_rx",
+      "ace_inhibitor_rx",
+      "arb_rx",
+      "thiazide_rx",
+      "loop_diuretic_rx"
+    ),
+    prefix == "med"
+  ) %>%
+  cross_codeset_comparison(denom = enc_type_cts,
+                           codeset_ct_tbl = .,
+                           ymax = 10)
+```
+
+### Beta blockers
+
+Table \@ref(tab:bbrxmissing) indicates calendar years without beta blocker medication data for each site. For sites with this data, Figure \@ref(fig:bbrxpercents) depicts the percentage patients with at least one beta blocker drug exposure for each calendar year, where the denominator is the number of patients in the cohort with an ambulatory visit. Figures \@ref(fig:bbheatmappres) and \@ref(fig:bbheatmapadmin) show the distribution of ingredients among the beta blockers for each site for prescriptions and administrations, respectively. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort receiving the ingredient. Analogous tables and visualizations are produced for each medication.
+
+```{r bbrxmissing}
+get_missing_years(codeset_cts, 'bb_rx') %>%
+  prettify_kable(table_caption = "Beta blockers: Calendar years with missing data")
+```
+
+```{r bbrxpercents, fig.cap="Beta blockers: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "bb_rx",
+                      denom = enc_type_cts,
+                      ylim_max = 30)
+```
+
+```{r bbheatmappres, fig.cap="Beta blockers: Heatmap of drug ingredient distribution (prescriptions)"}
+bb_heatmap<- prescriptions %>%
+  make_code_table(.,bb_codes) %>%
+  make_heatmap(main="Beta blocker ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r bbheatmapadmin, fig.cap="Beta blockers: Heatmap of drug ingredient distribution (administrations)"}
+bb_heatmap<- administrations %>%
+  make_code_table(.,bb_codes) %>%
+  make_heatmap(main="Beta blocker ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+### Calcium channel blockers
+
+Table \@ref(tab:ccbrxmissing) indicates calendar years without calcium channel blocker medication data, whereas Figure \@ref(fig:ccbrxpercents) depicts the percentage patients with an ambulatory visit with a calcium channel blocker medication exposure across time. Figures \@ref(fig:ccbheatmappres) and \@ref(fig:ccbheatmapadmin) show the distribution of ingredients among the calcium channel blockers for each site for prescriptions and administrations, respectively.
+
+```{r ccbrxmissing}
+get_missing_years(codeset_cts, 'ccb_rx') %>%
+  prettify_kable(table_caption = "Calcium channel blockers: Calendar years with missing data")
+```
+
+```{r ccbrxpercents, fig.cap="Calcium channel blockers: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "ccb_rx",
+                      denom = enc_type_cts)
+
+```
+
+```{r ccbheatmappres, fig.cap="Calcium channel blockers: Heatmap of drug ingredient distribution (prescriptions)"}
+ccb_heatmap<- prescriptions %>%
+  make_code_table(.,ccb_codes) %>%
+  make_heatmap(main="Calcium channel blocker ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r ccbheatmapadmin, fig.cap="Calcium channel blockers: Heatmap of drug ingredient distribution (administrations)"}
+ccb_heatmap<- administrations %>%
+  make_code_table(.,ccb_codes) %>%
+  make_heatmap(main="Calcium channel blocker ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+### Loop diuretics
+
+Table \@ref(tab:loopdiureticrxmissing) indicates calendar years without loop diuretic medication data, whereas Figure \@ref(fig:loopdiureticrxpercents) depicts the percentage patients with an ambulatory visit with a loop diuretic medication exposure across time. Figures \@ref(fig:loopdiureticsheatmappres) and \@ref(fig:loopdiureticsheatmapadmin) show the distribution of ingredients among the loop diuretics for each site for prescriptions and administrations, respectively.
+
+```{r loopdiureticrxmissing}
+get_missing_years(codeset_cts, 'loop_diuretic_rx') %>%
+  prettify_kable(table_caption = "Loop diuretics: Calendar years with missing data")
+```
+
+```{r loopdiureticrxpercents, fig.cap="Loop diuretics: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "loop_diuretic_rx",
+                      denom = enc_type_cts,
+                      ylim_max = 30)
+```
+
+```{r loopdiureticsheatmappres, fig.cap="Loop diuretics: Heatmap of drug ingredient distribution (prescriptions)"}
+loop_diuretics_heatmap<- prescriptions %>%
+  make_code_table(.,loop_diuretics_codes) %>%
+  make_heatmap(main="Loop diuretic ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r loopdiureticsheatmapadmin, fig.cap="Loop diuretics: Heatmap of drug ingredient distribution (administrations)"}
+loop_diuretics_heatmap<- administrations %>%
+  make_code_table(.,loop_diuretics_codes) %>%
+  make_heatmap(main="Loop diuretic ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+### Angiotensin-converting-enzyme (ACE) inhibitors {#angiotensin-converting-enzyme-ace-inhibitors}
+
+Table \@ref(tab:aceinhibitorrxmissing) indicates calendar years without ACE inhibitor medication data, whereas Figure \@ref(fig:aceinhibitorrxpercents) depicts the percentage patients with an ambulatory visit with an ACE inhibitor medication exposure across time. Figures \@ref(fig:aceinhibitorheatmappres) and \@ref(fig:aceinhibitorheatmapadmin) show the distribution of ingredients among the loop diuretics for each site for prescriptions and administrations, respectively.
+
+```{r aceinhibitorrxmissing}
+get_missing_years(codeset_cts, 'ace_inhibitor_rx') %>%
+  prettify_kable(table_caption = "ACE Inhibitors: Calendar years with missing data")
+```
+
+```{r aceinhibitorrxpercents, fig.cap="ACE Inhibitors: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "ace_inhibitor_rx",
+                      denom = enc_type_cts,
+                      ylim_max = 40)
+
+```
+
+```{r aceinhibitorheatmappres, fig.cap="ACE Inhibitors: Heatmap of drug ingredient distribution (prescriptions)"}
+ace_inhibitor_heatmap<- prescriptions %>%
+  make_code_table(.,ace_inhibitor_codes) %>%
+  make_heatmap(main="ACE Inhibitor ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r aceinhibitorheatmapadmin, fig.cap="ACE Inhibitors: Heatmap of drug ingredient distribution (administrations)"}
+ace_inhibitor_heatmap<- administrations %>%
+  make_code_table(.,ace_inhibitor_codes) %>%
+  make_heatmap(main="ACE Inhibitor ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+### Angiotensin receptor blockers (ARBs)
+
+Table \@ref(tab:arbrxmissing) indicates calendar years without ARB medication data, whereas Figure \@ref(fig:arbrxpercents) depicts the percentage patients with an ambulatory visit with an ARB medication exposure across time. Figures \@ref(fig:arbheatmappres) and \@ref(fig:arbheatmapadmin) show the distribution of ingredients among the ARBs for each site for prescriptions and administrations, respectively.
+
+```{r arbrxmissing}
+get_missing_years(codeset_cts, 'arb_rx') %>%
+  prettify_kable(table_caption = "ARBs: Calendar years with missing data")
+```
+
+```{r arbrxpercents, fig.cap="ARBs: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "arb_rx",
+                      denom = enc_type_cts,
+                      ylim_max = 30)
+
+```
+
+```{r arbheatmappres, fig.cap="ARBs: Heatmap of drug ingredient distribution (prescriptions)"}
+arb_heatmap<- prescriptions %>%
+  make_code_table(.,arb_codes) %>%
+  make_heatmap(main="ARB ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r arbheatmapadmin, fig.cap="ARBs: Heatmap of drug ingredient distribution (administrations)"}
+arb_heatmap<- administrations %>%
+  make_code_table(.,arb_codes) %>%
+  make_heatmap(main="ARB ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+### Thiazides
+
+Table \@ref(tab:thiaziderxmissing) indicates calendar years without thiazide medication data, whereas Figure \@ref(fig:thiaziderxpercents) depicts the percentage patients with an ambulatory visit with a thiazide medication exposure across time. Figures \@ref(fig:arbheatmappres) and \@ref(fig:arbheatmapadmin) show the distribution of ingredients among the thiazides for each site for prescriptions and administrations, respectively.
+
+```{r thiaziderxmissing}
+get_missing_years(codeset_cts, 'thiazide_rx') %>%
+  prettify_kable(table_caption = "Thiazides: Calendar years with missing data")
+```
+
+```{r thiaziderxpercents, fig.cap="Thiazides: Percentage patients with ambulatory visit with medication exposure"}
+codeset_cts %>%
+  get_codeset_summary(codeset_name = "thiazide_rx",
+                      denom = enc_type_cts,
+                      ylim_max = 20)
+
+```
+
+```{r thiazideheatmappres, fig.cap="Thiazides: Heatmap of drug ingredient distribution (prescriptions)"}
+thiazide_heatmap<- prescriptions %>%
+  make_code_table(.,thiazide_codes) %>%
+  make_heatmap(main="Thiazide ingredient (prescriptions)",
+               grp_by="ingredient")
+```
+
+```{r thiazideheatmapadmin, fig.cap="Thiazides: Heatmap of drug ingredient distribution (administrations)"}
+thiazide_heatmap<- administrations %>%
+  make_code_table(.,thiazide_codes) %>%
+  make_heatmap(main="Thiazide ingredient (administrations)",
+               grp_by="ingredient")
+```
+
+
+## Procedures
+
+```{r}
+dx_cts<-diag_dx_cts %>%
+  rename("concept_code"="DX", "code_type"="DX_TYPE")
+px_cts<-proc_px_cts %>%
+  rename("concept_code"="PX", "code_type"="PX_TYPE")
+
+
+px_dialysis_path<-"../specs/kidney_dialysis_px.sas7bdat"
+dx_dialysis_path<-"../specs/kidney_dialysis_dx.sas7bdat"
+px_transplant_path<-"../specs/kidney_transplant_px.sas7bdat"
+dx_transplant_path<-"../specs/kidney_transplant_dx.sas7bdat"
+
+
+px_dialysis_codes<-read_codes(px_dialysis_path)
+dx_dialysis_codes<-read_codes(dx_dialysis_path)
+px_transplant_codes<-read_codes(px_transplant_path)
+dx_transplant_codes<-read_codes(dx_transplant_path)
+
+px_dialysis<-make_code_table(px_cts, px_dialysis_codes)
+dx_dialysis<-make_code_table(dx_cts, dx_dialysis_codes)
+px_transplant<-make_code_table(px_cts, px_transplant_codes)
+dx_transplant<-make_code_table(dx_cts, dx_transplant_codes)
+
+px_dx_dialysis<-rbind(px_dialysis, dx_dialysis)
+
+px_dx_transplant<-rbind(px_transplant, dx_transplant)
+```
+
+### Kidney dialysis
+
+Table \@ref(tab:kidneydialysismissing) indicates calendar years without kidney dialysis data, whereas Figure \@ref(fig:kidneydialysispercents) depicts the percentage patients with an ambulatory visit with at least one kidney dialysis across time. Figure \@ref(fig:kidneydialysispxheatmap) shows the most frequent dialysis procedure codes, limited to one code per calendar year for each patient. Procedure codes with a prevalence of less than 0.5% across sites are excluded. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code.
+
+```{r kidneydialysismissing}
+get_missing_years(codeset_cts, 'kidney_dialysis_px') %>%
+  prettify_kable(table_caption = "Kidney dialysis procedures: Calendar years with missing data")
+```
+
+```{r kidneydialysispercents, fig.cap="Kidney dialysis procedure: Percentage patients with ambulatory visit with procedure"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "kidney_dialysis_px",
+                                ylim_min = 0,
+                                ylim_max = 35)
+```
+
+```{r kidneydialysispxheatmap, fig.length = 15, fig.cap="Kidney dialysis procedure: Heatmap of frequent procedure codes"}
+make_heatmap2(px_dialysis, main="Frequent dialysis procedure codes", cexRow=0.9, threshold = 0.005)
+```
+
+### Kidney transplant
+
+Table \@ref(tab:kidneytransplantmissing) indicates calendar years without kidney transplant data, whereas Figure \@ref(fig:kidneytransplantpercents) depicts the percentage patients with an ambulatory visit with at least one kidney transplant across time. Figure \@ref(fig:kidneytransplantheatmap) shows the most frequent transplant procedure codes, with counts limited to one code per calendar year for each patient. Procedure codes with a prevalence of less than 0.1% across sites are excluded. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code.
+
+```{r kidneytransplantmissing}
+get_missing_years(codeset_cts, 'kidney_transplant_px') %>%
+  prettify_kable(table_caption = "Kidney transplant procedures: Calendar years with missing data")
+```
+
+```{r kidneytransplantpercents, fig.cap="Kidney transplant procedure: Percentage patients with ambulatory visit with procedure"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "kidney_transplant_px",
+                                ylim_min = 0,
+                                ylim_max = 15)
+```
+
+```{r kidneytransplantheatmap, fig.length = 15, fig.cap="Kidney transplant procedure: Heatmap of frequent procedure codes"}
+make_heatmap2(px_transplant, main="Frequent transplant procedure codes", cexRow=0.9, threshold = 0.005)
+```
+
+## Diagnoses
+
+### Kidney dialysis related diagnoses
+
+Table \@ref(tab:kidneydialysisdxmissing) indicates calendar years without kidney dialysis related diagnosis data, whereas Figure \@ref(fig:kidneydialysisdxpercents) depicts the percentage patients with an ambulatory visit with at least one kidney dialysis related diagnosis across time. Figure \@ref(fig:kidneydialysisdxheatmap) shows the most frequent diagnosis codes, limited to one code per calendar year for each patient. Diagnosis codes with a prevalence of less than 0.5% across sites are excluded. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code.
+
+```{r kidneydialysisdxmissing}
+get_missing_years(codeset_cts, 'kidney_dialysis_dx') %>%
+  prettify_kable(table_caption = "Kidney dialysis related diagnoses: Calendar years with missing data")
+```
+
+```{r kidneydialysisdxpercents, fig.cap="Kidney dialysis diagnosis: Percentage patients with ambulatory visit with diagnosis"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "kidney_dialysis_dx",
+                                ylim_min = 0,
+                                ylim_max = 25)
+```
+
+```{r kidneydialysisdxheatmap, fig.length = 15, fig.cap="Kidney dialysis diagnosis: Heatmap of frequent diagnosis codes"}
+make_heatmap2(dx_dialysis, main="Frequent dialysis diagnosis codes", cexRow=0.9, threshold = 0.005)
+```
+
+### Kidney transplant related diagnoses
+
+Table \@ref(tab:kidneytransplantdxmissing) indicates calendar years without kidney transplant related diagnosis data, whereas Figure \@ref(fig:kidneytransplantdxpercents) depicts the percentage patients with an ambulatory visit with at least one kidney transplant related diagnosis across time. Figure \@ref(fig:kidneytransplantdxheatmap) shows the most frequent diagnosis codes, limited to one code per calendar year for each patient. Diagnosis codes with a prevalence of less than 0.5% across sites are excluded. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code.
+
+```{r kidneytransplantdxmissing}
+get_missing_years(codeset_cts, 'kidney_transplant_dx') %>%
+  prettify_kable(table_caption = "Kidney transplant related diagnoses: Calendar years with missing data")
+```
+
+```{r kidneytransplantdxpercents, fig.cap="Kidney transplant diagnosis: Percentage patients with ambulatory visit with diagnosis"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "kidney_transplant_dx",
+                                ylim_min = 0,
+                                ylim_max = 40)
+```
+
+```{r kidneytransplantdxheatmap, fig.length = 15, fig.cap="Kidney transplant diagnosis: Heatmap of frequent diagnosis codes"}
+make_heatmap2(dx_transplant, main="Frequent transplant related diagnosis codes", cexRow=0.9, threshold = 0.005)
+```
+
+### CKD Stage 2/3 diagnoses
+
+Table \@ref(tab:ckdstage23dxmissing) indicates calendar years without CKD Stage 2/3 diagnosis data, whereas Figure \@ref(fig:ckdstage23dxpercents) depicts the percentage patients with an ambulatory visit with at least one CKD Stage 2/3 diagnosis across time. Figure \@ref(fig:ckdstage23dxheatmap) shows the most frequent diagnosis codes, limited to one code per calendar year for each patient. Diagnosis codes with a prevalence of less than 0.5% across sites are excluded. The shading represents the distribution of codes within each site, with a darker shade indicating that a larger proportion of patients in the cohort with the code.
+
+```{r ckdstage23dxmissing}
+get_missing_years(codeset_cts, 'ckd_stage23_dx') %>%
+  prettify_kable(table_caption = "CKD Stage 2/3 diagnoses: Calendar years with missing data")
+```
+
+```{r ckdstage23dxpercents, fig.cap="CKD Stage 2/3 diagnoses: Percentage patients with ambulatory visit with diagnosis"}
+codeset_cts %>% 
+  get_codeset_summary(codeset_name = "ckd_stage23_dx",
+                                ylim_min = 0,
+                                ylim_max = 50)
+```
+
+```{r ckdstage23dxheatmap, fig.length = 15, fig.cap="CKD Stage 2/3 diagnoses: Heatmap of frequent diagnosis codes"}
+make_heatmap2(dx_transplant, main="Frequent CKD Stage 2/3 diagnosis codes", cexRow=0.9, threshold = 0.005)
+```
+
+## Heights and weights
+
+### Height
+
+#### Counts
+
+Table \@ref(tab:heightmissing) summarizes sites with missing height data. A number of sites do not have measurements for earlier years of the study period. Site `r sites$C`, in contrast, has missingness across the study period.
+
+```{r heightmissing}
+get_missing_years_vitals(vital_ht_cts) %>% 
+  prettify_kable(table_caption = "Heights: Calendar years with missing data")
+```
+
+Figure \@ref(fig:heightcts) depicts the number of height measurements per patient per calendar year. Figure \@ref(fig:heightctsrem) depicts the same information, excluding Site `r sites$H` due to its anomalously high counts per patient starting after 2013.
+
+```{r heightcts, fig.cap = "Heights: Measurements per patient"}
+get_vitals_cts_summary(vital_ht_cts)
+```
+
+```{r heightctsrem, fig.cap = "Heights: Measurements per patient (excluding Site site_H)"}
+get_vitals_cts_summary(vital_ht_cts %>% filter(site_name != "H" & site_name != "site_H"))
+```
+
+#### Values
+
+Figure \@ref(fig:heightvals) depicts the distribution of mean height measurements (in inches) for each year of age. Site `r sites$H` has anomalously low height measurements. Figure \@ref(fig:heightvals10) and \@ref(fig:heightvals17) provides distributions of mean height measurements at age 10 and 17, respectively.
+
+```{r heightvals, fig.cap = "Heights: Distribution of mean values across year of age"}
+get_vitals_vals_summary(vital_ht_vals %>% rename(mean_meas = mean_height_in,
+                                                     sd_meas = sd_height_in)) + ylab("Mean height measurement (inches)")
+```
+
+```{r heightvals10, fig.cap = "Height: Distribution of mean values aged 10"}
+vital_ht_vals %>%
+  filter(age_years == 10) %>%
+  rename(median_res = median_height_in,
+         mean_res = mean_height_in) %>%
+  dot_plot_result_vitals(xmin = 30,
+                         xlab_name = "Height measurement (inches)",
+                         result_ceiling = 80)
+```
+
+```{r heightvals17, fig.cap = "Height: Distribution of mean values aged 17"}
+vital_ht_vals %>%
+  filter(age_years == 17) %>% 
+  rename(median_res = median_height_in,
+         mean_res = mean_height_in) %>%
+  dot_plot_result_vitals(xmin = 40,
+                         xlab_name = "Height measurement (inches)",
+                         result_ceiling = 80)
+```
+
+### Weight
+
+#### Counts
+
+Table \@ref(tab:weightmissing) summarizes sites with missing weight data. A number of sites do not have measurements for earlier years of the study period. Site `r sites$C`, in contrast, has missingness across the study period.
+
+```{r weightmissing}
+get_missing_years_vitals(vital_wt_cts) %>% 
+  prettify_kable(table_caption = "Weights: Calendar years with missing data")
+```
+
+Figure \@ref(fig:weightcts) depicts the number of weight measurements per patient per calendar year. Figure \@ref(fig:weightctsrem) depicts the same information, excluding Site `r sites$H` and Site `r sites$P` due to their anomalously high counts per patient starting after 2013.
+
+```{r weightcts, fig.cap = "Weights: Measurements per patient"}
+get_vitals_cts_summary(vital_wt_cts)
+```
+
+```{r weightctsrem, fig.cap = "Weights: Measurements per patient (excluding Site site_H and Site site_P)"}
+get_vitals_cts_summary(vital_wt_cts %>% filter(site_name != "H",
+                                               site_name != "site_H",
+                                               site_name != "P",
+                                               site_name != "site_P"))
+```
+
+#### Values
+
+Figure \@ref(fig:weightvals) depicts the distribution of mean weight measurements (in lbs) for each year of age. Figures \@ref(fig:weightvals10) and \@ref(fig:weightvals15) provides distributions of mean height measurements at age 10 and 15, respectively.
+
+```{r weightvals, fig.cap = "Weights: Distribution of mean values across year of age"}
+get_vitals_vals_summary(vital_wt_vals %>% filter(prefix == "attr_cht") %>% rename(mean_meas = mean_weight_lb,
+                                                     sd_meas = sd_weight_lb)) +
+  ylab("Mean weight measurement (lbs)")
+```
+
+```{r weightvals10, fig.cap = "Weight: Distribution of mean values aged 10"}
+vital_wt_vals %>%
+  filter(age_years == 10) %>% 
+  rename(median_res = median_weight_lb,
+         mean_res = mean_weight_lb) %>%
+  dot_plot_result_vitals(xmin = 50,
+                         xlab_name = "Weight measurement (lbs)",
+                         result_ceiling = 150)
+```
+
+```{r weightvals15, fig.cap = "Weight: Distribution of mean values aged 15"}
+vital_wt_vals %>%
+  filter(age_years == 15) %>% 
+  rename(median_res = median_weight_lb,
+         mean_res = mean_weight_lb) %>%
+  dot_plot_result_vitals(xmin = 100,
+                         xlab_name = "Weight measurement (lbs)",
+                         result_ceiling = 200)
+```
+
+## Blood pressures
+
+For both diastolic and systolic blood pressure measurements, Sites `r sites$C` and `r sites$F` have higher mean values than most other sites (Figures \@ref(fig:diabpvals2) and \@ref(fig:sysbpvals2)) and Site `r sites$H` has an anomalously large number of measurements per patient (Figures \@ref(fig:diabpcts) and \@ref(fig:sysbpcts)). For diastolic blood pressure measurements only, Site `r sites$O` does not have any measurements (Table \@ref(tab:diabpmissing)) and Sites `r sites$E` and `r sites$M` have some very low measurements, although their overall means pattern with other sites (Figure \@ref(fig:diabpvals2)). For systolic blood pressure only, Site `r sites$P` has some very low measurements, but its overall mean patterns with other sites (Figures \@ref(fig:sysbpvals2)).
+
+### Diastolic blood pressure
+
+#### Counts
+
+Table \@ref(tab:diabpmissing) summarizes sites with missing weight data. A number of sites do not have measurements for earlier years of the study period. Site `r sites$C` has missingness across the study period. Site `r sites$O` does not have any diastolic blood pressure measurements.
+
+```{r diabpmissing}
+get_missing_years_vitals(vital_dia_bp_cts) %>% 
+  prettify_kable(table_caption = "Diastolic blood pressure: Calendar years with missing data")
+```
+
+Figure \@ref(fig:diabpcts) depicts the number of diastolic blood pressure measurements per patient per calendar year.
+
+```{r diabpcts, fig.cap = "Diastolic blood pressure: Measurements per patient"}
+get_vitals_cts_summary(vital_dia_bp_cts)
+```
+
+#### Values
+
+Figure \@ref(fig:diabpvals) depicts the distribution of diastolic blood pressure measurements (mmHg) for each year of age.
+
+```{r diabpvals, fig.cap = "Diastolic blood pressure: Distribution of mean values across year of age"}
+get_vitals_vals_summary(vital_dia_bp_vals %>% rename(mean_meas = mean_dia_bp,
+                                                     sd_meas = sd_dia_bp) ) +
+  ylab("Mean diastolic blood pressurement measurement (mmHg)")
+```
+
+Figure \@ref(fig:diabpvals2) depicts the distribution of mean diastolic blood pressure measurements (mmHg), summarizing across years of age. The dots are site-specific weighted means and the widths of the violin plot correspond to the approximate frequency of patients with these values. The horizontal black line is the overall weighted mean.
+
+```{r diabpvals2, fig.cap = "Diastolic blood pressure: Distribution of mean values"}
+vital_dia_bp_vals %>%
+  make_bp_table("mean_dia_bp") %>%
+  make_violin_plot(xlab="Diastolic blood pressure measurements (mmHg)", xmin=30, xmax=120,
+                   ylab = "Site")
+```
+
+### Systolic blood pressure
+
+#### Counts
+
+Table \@ref(tab:sysbpmissing) summarizes sites with missing weight data. A number of sites do not have measurements for earlier years of the study period. Site `r sites$C` has missingness across the study period.
+
+```{r sysbpmissing}
+get_missing_years_vitals(vital_sys_bp_cts) %>% 
+  prettify_kable(table_caption = "Systolic blood pressure: Calendar years with missing data")
+```
+
+Figure \@ref(fig:sysbpcts) depicts the number of systolic blood pressure measurements per patient per calendar year. Figure \@ref(fig:sysbpctsrem) depicts the same information, excluding Site `r sites$H` due to its anomalously high counts per patient starting after 2013.
+
+```{r sysbpcts, fig.cap = "Systolic blood pressure: Measurements per patient"}
+get_vitals_cts_summary(vital_sys_bp_cts)
+```
+
+```{r sysbpctsrem, fig.cap = "Systolic blood pressure: Measurements per patient (excluding Site site_H)"}
+get_vitals_cts_summary(vital_sys_bp_cts %>% 
+                          filter(!site_name == "H",
+                                 !site_name == "site_H"))
+```
+
+#### Values
+
+Figure \@ref(fig:sysbpvals) depicts the distribution of systolic blood pressure measurement (mmHg) for each year of age.
+
+```{r sysbpvals, fig.cap = "Systolic blood pressure: Distribution of mean values across year of age"}
+get_vitals_vals_summary(vital_sys_bp_vals %>% rename(mean_meas = mean_sys_bp,
+                                                     sd_meas = sd_sys_bp)) +
+  ylab("Systolic blood pressure measurement (mmHg)")
+```
+
+Figure \@ref(fig:sysbpvals2) summarizes the distribution of mean systolic blood pressure measurements (mmHg), summarizing across years of age. The dots are site-specific weighted means and the widths of the violin plot correspond to the approximate frequency of patients with these values. The horizontal black line is the overall weighted mean.
+
+```{r sysbpvals2, fig.cap = "Systolic blood pressure: Distribution of aggregated values"}
+vital_sys_bp_vals %>%
+  make_bp_table("mean_sys_bp") %>%
+  make_violin_plot(xlab="Systolic blood pressure measurements (mmHg)", xmin=80, xmax=200,
+                   ylab = "Site")
+```
+
+## Data curation check summary
+
+```{r dc_configs_etc}
+config('results_schema', 'pcc_dc')
+site_report_config <-
+  read_csv("../specs/site_report_config.csv", col_types = "cccc")
+
+site_colours <-
+  site_report_config %>%
+  select(site_name, site_colour) %>%
+  tibble::deframe()
+
+site_linetypes <-
+  site_report_config %>%
+  select(site_name, site_linetype) %>%
+  tibble::deframe()
+
+#Pull Results from database
+dc_checks_results<-as.tibble(results_tbl('dc_checks_results'))%>%
+                    rename(site_name=site)%>%
+                    collect() %>%
+                    add_site_labels()
+
+lab_measures <- get_results('lab_l3_recordc')
+lab_counts <-
+  get_results('lab_l3_n') %>% filter(TAG == 'LAB_RESULT_CM_ID')
+quant_lab_counts <-
+  lab_measures %>% filter(TAG == 'KNOWN_TEST_RESULT_NUM')
+n_pats <- get_results('enc_l3_n') %>% filter(TAG == 'PATID')
+```
+
+The PRESERVE CC requested a subset of the PCORnet Data Curation (DC) tables from each site, allowing evaluation of a limited set of DC checks which were determined to be important for the PRESERVE study. These DC checks apply to each site's entire datamart, rather than being restricted to a cohort of interest and as such, may be indicative of more general data quality issues. The following DC checks were evaluated:
+
+| PCORnet DC Check | Description                                                                                                                                           |
+|------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| DC 1.17          | Zip codes in the ENCOUNTER or LDS_ADDRESS_HISTORY table do not conform to expected values                                                             |
+| DC 2.03          | More than 5% of patients have illogical date relationships                                                                                            |
+| DC 2.06          | The median lab result values for selected laboratory tests is an outlier                                                                              |
+| DC 2.08          | The monthly volume of encounter, diagnosis, procedure, vital, prescribing, or laboratory records is an outlier.                                       |
+| DC 3.04          | Less than 50% of patients with encounters have DIAGNOSIS records.                                                                                     |
+| DC 3.05          | Less than 50% of patients with encounters have PROCEDURES records.                                                                                    |
+| DC 3.08          | Less than 80% of prescribing orders are mapped to a RXNORM_CUI which fully specifies the ingredient, strength, and dose form.                         |
+| DC 3.09          | Less than 80% of laboratory results are mapped to LAB_LOINC and have either a quantitative or qualitative result.                                     |
+| DC 3.10          | Less than 80% of quantitative results for tests mapped to LAB_LOINC fully specify the normal range.                                                   |
+| DC 3.12          | Less than 80% of quantitative results for tests mapped to LAB_LOINC fully specify the result unit.                                                    |
+| DC 3.15          | Less than 80% of medication administrations mapped to RXNORM are mapped to a RXNORM_CUI that fully specifies the ingredient, strength, and dose form. |
+
+Exceptions at one or more sites were found for the following DC checks:
+
+```{r dccheckexceptions}
+dc_checks_results%>%
+  group_by(checks,descriptions,Exceptions)%>%
+  summarise(n_sites=n_distinct(site_name),
+            site_list = list(site_name))%>%
+  rename(`PCORnet DC check` = checks,
+         Description = descriptions,
+         `N sites` = n_sites,
+         Sites = site_list) %>% 
+  prettify_kable(table_caption = "PCORnet DC checks with >= 1 exception")
+```
+
+The remaining sections provide more information about each of these exceptions.
+
+### DC 1.17: Zip codes in the ENCOUNTER or LDS_ADDRESS_HISTORY table do not conform to expected values
+
+For Site `r sites$C`, there is no data in the address history table. For sites `r sites$F`, `r sites$J`, `r sites$K`, and `r sites$M`, the additional information column in Table \@ref(tab:dc117) provides the difference between the number of distinct patients and those with a valid zip code. Please note that counts greater than zero but fewer than 11 are suppressed with counts of 10.
+
+```{r dc117}
+display_check('DC 1.17') %>%
+  mutate(
+    `Additional information` = as.numeric(`Additional information`),
+    `Additional information` = if_else(
+      `Additional information` > 0 &
+        `Additional information` < 11,
+      10,
+      `Additional information`
+    )) %>% 
+  prettify_kable(table_caption = "DC 1.17")
+```
+
+### DC 2.03: More than 5% of patients have illogical date relationships
+
+In Table \@ref(tab:dc203), the additional information column provides the data relationship with the highest rate of illogical values.
+
+```{r dc203}
+
+display_check('DC 2.03') %>%
+  prettify_kable(table_caption = "DC 2.03")
+
+```
+
+### DC 3.10: Less than 80% of quantitative results for tests mapped to LAB_LOINC fully specify the normal range
+
+In Table \@ref(tab:dc310), the additional information column provides the percentage records which fully specify the normal range (0% at Site `r sites$C`).
+
+```{r dc310}
+display_check('DC 3.10') %>% 
+  prettify_kable(table_caption = 'DC 3.10')
+```
+
+### DC 3.12: Less than 80% of quantitative results for tests mapped to LAB_LOINC fully specify the result unit
+
+In Table \@ref(tab:dc312), the additional information column provides the percentage records which fully specify the result unit. For Site `r sites$O`, the percentage approaches the check threshold.
+
+```{r dc312}
+
+display_check('DC 3.12') %>% 
+  mutate(`Additional information` = round(as.numeric(`Additional information`), digits = 2)) %>% 
+  prettify_kable(table_caption = 'DC 3.12')
+
+```
+
+### DC 3.15: Less than 80% of medication administrations mapped to RXNORM are mapped to a RXNORM_CUI that fully specifies the ingredient, strength, and dose form (Tier 1)
+
+For site `r sites$C`, the medication administration table is empty.
+
+```{r dc315}
+
+display_check('DC 3.15') %>% 
+  prettify_kable(table_caption = 'DC 3.15')
+
+
+```

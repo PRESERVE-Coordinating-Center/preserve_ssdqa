@@ -1,0 +1,11 @@
+﻿concept_id,concept_code,concept_name,vocabulary_id,category
+45553741,R53,Malaise and fatigue,ICD10,fatigue
+1572255,R53,Malaise and fatigue,ICD10CM,fatigue
+45602032,R53.1,Weakness,ICD10CM,fatigue
+1572256,R53.8,Other malaise and fatigue,ICD10CM,fatigue
+45582718,R53.81,Other malaise,ICD10CM,fatigue
+45573032,R53.82,"Chronic fatigue, unspecified",ICD10CM,fatigue
+45534458,R53.83,Other fatigue,ICD10CM,fatigue
+44829293,780.7,Malaise and fatigue,ICD9CM,fatigue
+44828146,780.71,Chronic fatigue syndrome,ICD9CM,fatigue
+44823445,780.79,Other malaise and fatigue,ICD9CM,fatigue
